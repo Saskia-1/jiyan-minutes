@@ -6,6 +6,7 @@ import ipaddress
 import json as json_module
 import math
 import re
+import threading
 from collections.abc import Callable, Mapping
 from types import MappingProxyType, TracebackType
 from typing import Any, Self
@@ -117,6 +118,7 @@ class LoopbackTransport:
         self._cap = max_body_bytes
         self._allowed_requests = _SOURCE_ALLOWLIST.get(source, frozenset())
         self._closed = False
+        self._lifecycle_lock = threading.RLock()
         self._client = httpx.Client(
             transport=mock_transport,
             follow_redirects=False,
@@ -128,7 +130,10 @@ class LoopbackTransport:
         return "<LoopbackTransport>"
 
     def __enter__(self) -> Self:
-        return self
+        with self._lifecycle_lock:
+            if self._closed:
+                raise TransportError("Source transport is closed.")
+            return self
 
     def __exit__(
         self,
@@ -140,14 +145,21 @@ class LoopbackTransport:
 
     def close(self) -> None:
         """Release the owned client; safe to call more than once."""
-        if self._closed:
-            return
-        self._closed = True
-        try:
-            self._client.cookies.clear()
-            self._client.close()
-        except Exception:
-            raise TransportError("Source transport could not close.") from None
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            close_failed = False
+            try:
+                self._client.cookies.clear()
+            except Exception:
+                close_failed = True
+            try:
+                self._client.close()
+            except Exception:
+                close_failed = True
+            if close_failed:
+                raise TransportError("Source transport could not close.")
 
     def request(
         self,
@@ -158,45 +170,51 @@ class LoopbackTransport:
         params: Mapping[str, object] | None = None,
         json: object | None = None,
     ) -> dict[str, Any]:
-        if self._closed:
-            raise TransportError("Source transport is closed.")
-        self._validate_request(method, path, headers, params)
-        try:
-            self._client.cookies.clear()
-            with self._client.stream(
-                method,
-                self._url.copy_with(path=path),
-                headers=headers,
-                params=params,
-                json=json,
-                follow_redirects=False,
-            ) as response:
-                status_code = response.status_code
-                body = bytearray()
-                body_too_large = False
-                if status_code < 300:
-                    for chunk in response.iter_bytes():
-                        if len(chunk) > self._cap - len(body):
-                            body_too_large = True
-                            break
-                        body.extend(chunk)
-        except Exception:
-            raise TransportError("Source transport failed.") from None
-        finally:
-            self._client.cookies.clear()
-        if 300 <= status_code < 400:
-            raise RedirectRejected("Source redirect rejected.")
-        if status_code >= 400:
-            raise UpstreamHttpError("Source request failed.")
-        if body_too_large:
-            raise ResponseTooLarge("Source response exceeded the configured limit.")
-        try:
-            result = json_module.loads(bytes(body))
-        except (MemoryError, RecursionError, TypeError, UnicodeDecodeError, ValueError):
-            raise MalformedResponse("Source response was not valid JSON.") from None
-        if not isinstance(result, dict):
-            raise MalformedResponse("Source response was not valid JSON.")
-        return result
+        with self._lifecycle_lock:
+            if self._closed:
+                raise TransportError("Source transport is closed.")
+            self._validate_request(method, path, headers, params)
+            request_failed = False
+            try:
+                self._client.cookies.clear()
+                with self._client.stream(
+                    method,
+                    self._url.copy_with(path=path),
+                    headers=headers,
+                    params=params,
+                    json=json,
+                    follow_redirects=False,
+                ) as response:
+                    status_code = response.status_code
+                    body = bytearray()
+                    body_too_large = False
+                    if status_code < 300:
+                        for chunk in response.iter_bytes():
+                            if len(chunk) > self._cap - len(body):
+                                body_too_large = True
+                                break
+                            body.extend(chunk)
+            except Exception:
+                request_failed = True
+            try:
+                self._client.cookies.clear()
+            except Exception:
+                request_failed = True
+            if request_failed:
+                raise TransportError("Source transport failed.")
+            if 300 <= status_code < 400:
+                raise RedirectRejected("Source redirect rejected.")
+            if status_code >= 400:
+                raise UpstreamHttpError("Source request failed.")
+            if body_too_large:
+                raise ResponseTooLarge("Source response exceeded the configured limit.")
+            try:
+                result = json_module.loads(bytes(body))
+            except (MemoryError, RecursionError, TypeError, UnicodeDecodeError, ValueError):
+                raise MalformedResponse("Source response was not valid JSON.") from None
+            if not isinstance(result, dict):
+                raise MalformedResponse("Source response was not valid JSON.")
+            return result
 
     @staticmethod
     def _resolver_is_safe(

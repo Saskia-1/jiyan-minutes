@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import unittest
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -60,6 +61,21 @@ class TrackingMockTransport(httpx.MockTransport):
     def close(self) -> None:
         self.close_calls += 1
         super().close()
+
+
+class BlockingStream(ChunkedStream):
+    """Synthetic response stream that pauses one request after headers arrive."""
+
+    def __init__(self, entered: threading.Event, release: threading.Event) -> None:
+        super().__init__((b'{"success": true}',))
+        self._entered = entered
+        self._release = release
+
+    def __iter__(self) -> Iterable[bytes]:
+        self._entered.set()
+        if not self._release.wait(timeout=2):
+            raise RuntimeError("synthetic stream timeout")
+        return super().__iter__()
 
 
 def mock_transport(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.MockTransport:
@@ -200,6 +216,156 @@ class LoopbackTransportTests(unittest.TestCase):
             failing_transport.request("GET", "/health", headers={})
         self.assertNotIn(SENTINEL, str(raised.exception))
         self.assertNotIn(SENTINEL, repr(raised.exception))
+
+    def test_concurrent_request_never_observes_another_response_cookie(self) -> None:
+        """Cookie clearing and request construction must be one serialized lifecycle."""
+        a_cleared = threading.Event()
+        allow_a = threading.Event()
+        b_reading = threading.Event()
+        allow_b_body = threading.Event()
+        errors: list[BaseException] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if threading.current_thread().name == "request-a":
+                self.assertNotIn("cookie", request.headers)
+                return httpx.Response(200, json={"success": True})
+            return httpx.Response(
+                200,
+                headers={"set-cookie": "session=" + SENTINEL + "; Path=/"},
+                stream=BlockingStream(b_reading, allow_b_body),
+            )
+
+        transport = qce_transport(mock_transport(handler))
+        original_clear = transport._client.cookies.clear
+
+        def controlled_clear() -> None:
+            original_clear()
+            if threading.current_thread().name == "request-a" and not a_cleared.is_set():
+                a_cleared.set()
+                if not allow_a.wait(timeout=2):
+                    raise RuntimeError("synthetic clear timeout")
+
+        def run_request() -> None:
+            try:
+                transport.request("GET", "/health", headers={})
+            except BaseException as error:
+                errors.append(error)
+
+        with mock.patch.object(transport._client.cookies, "clear", side_effect=controlled_clear):
+            request_a = threading.Thread(target=run_request, name="request-a")
+            request_b = threading.Thread(target=run_request, name="request-b")
+            request_a.start()
+            self.assertTrue(a_cleared.wait(timeout=1))
+            request_b.start()
+            b_reading.wait(timeout=0.1)
+            allow_a.set()
+            request_a.join(timeout=2)
+            self.assertFalse(request_a.is_alive())
+            self.assertTrue(b_reading.wait(timeout=1))
+            allow_b_body.set()
+            request_b.join(timeout=2)
+            self.assertFalse(request_b.is_alive())
+
+        self.assertEqual(errors, [])
+
+    def test_concurrent_cookie_responses_never_replay_across_multiple_rounds(self) -> None:
+        """Repeated concurrent calls cannot retain source authentication state."""
+        for round_number in range(3):
+            errors: list[BaseException] = []
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                self.assertNotIn("cookie", request.headers)
+                return httpx.Response(
+                    200,
+                    headers={"set-cookie": "round=" + str(round_number) + "; Path=/"},
+                    json={"success": True},
+                )
+
+            transport = qce_transport(mock_transport(handler))
+
+            def run_request() -> None:
+                try:
+                    transport.request("GET", "/health", headers={})
+                except BaseException as error:
+                    errors.append(error)
+
+            threads = [threading.Thread(target=run_request) for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=2)
+                self.assertFalse(thread.is_alive())
+            self.assertEqual(errors, [])
+
+    def test_close_waits_for_an_in_flight_request_before_closing_the_client(self) -> None:
+        """Closing cannot race a response stream that still owns the client."""
+        reading = threading.Event()
+        release_body = threading.Event()
+        request_errors: list[BaseException] = []
+        close_errors: list[BaseException] = []
+        close_finished = threading.Event()
+        transport = qce_transport(
+            mock_transport(
+                lambda _request: httpx.Response(
+                    200, stream=BlockingStream(reading, release_body)
+                )
+            )
+        )
+
+        def run_request() -> None:
+            try:
+                transport.request("GET", "/health", headers={})
+            except BaseException as error:
+                request_errors.append(error)
+
+        def run_close() -> None:
+            try:
+                transport.close()
+            except BaseException as error:
+                close_errors.append(error)
+            finally:
+                close_finished.set()
+
+        request_thread = threading.Thread(target=run_request)
+        request_thread.start()
+        self.assertTrue(reading.wait(timeout=1))
+        close_thread = threading.Thread(target=run_close)
+        close_thread.start()
+        self.assertFalse(close_finished.wait(timeout=0.1))
+        release_body.set()
+        request_thread.join(timeout=2)
+        close_thread.join(timeout=2)
+        self.assertFalse(request_thread.is_alive())
+        self.assertFalse(close_thread.is_alive())
+        self.assertEqual(request_errors, [])
+        self.assertEqual(close_errors, [])
+        self.assertTrue(close_finished.is_set())
+
+    def test_final_cookie_clear_failures_are_fixed_body_free_transport_errors(self) -> None:
+        """A cleanup failure cannot replace a safe public error with private detail."""
+        transport = qce_transport(
+            mock_transport(lambda _request: httpx.Response(200, json={"success": True}))
+        )
+        original_clear = transport._client.cookies.clear
+        clear_calls = 0
+
+        def clear_with_final_failure() -> None:
+            nonlocal clear_calls
+            clear_calls += 1
+            if clear_calls == 2:
+                raise RuntimeError(SENTINEL)
+            original_clear()
+
+        with mock.patch.object(
+            transport._client.cookies,
+            "clear",
+            side_effect=clear_with_final_failure,
+        ), self.assertRaises(TransportError) as raised:
+            transport.request("GET", "/health", headers={})
+        self.assertIs(type(raised.exception), TransportError)
+        self.assertEqual(str(raised.exception), "Source transport failed.")
+        self.assertNotIn(SENTINEL, repr(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
 
     def test_default_source_contract_fails_closed_and_only_allows_locked_routes(self) -> None:
         """An unbound or broadened transport could send or administrate upstream data."""
