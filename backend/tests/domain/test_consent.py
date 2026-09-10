@@ -31,6 +31,7 @@ class ConsentTests(unittest.TestCase):
             range_end="2026-09-01T01:00:00+08:00",
             output_path="/private/tmp/verification.json",
             operation="verification",
+            configuration_nonce="configuration-1",
         )
         changed_scope = scope.model_copy(update={"conversation_id": "conversation-2"})
         record = ConsentRecord.grant(scope, expires_at=NOW + timedelta(minutes=5), now=NOW)
@@ -49,6 +50,7 @@ class ConsentTests(unittest.TestCase):
             range_end="2026-09-01T01:00:00+08:00",
             output_path="/private/tmp/verification.json",
             operation="verification",
+            configuration_nonce="configuration-1",
         )
 
         self.assertFalse(
@@ -68,6 +70,7 @@ class ConsentTests(unittest.TestCase):
             client_version="9.9.0",
             tool_version="1.2.3",
             account_version="account-v1",
+            configuration_nonce="configuration-1",
         )
         record = ConsentRecord.grant(scope, expires_at=NOW + timedelta(minutes=5), now=NOW)
 
@@ -90,6 +93,7 @@ class ConsentTests(unittest.TestCase):
             client_version="9.9.0",
             tool_version="1.2.3",
             account_version="account-v1",
+            configuration_nonce="configuration-1",
         )
         record = ConsentRecord.grant(
             scope,
@@ -98,3 +102,31 @@ class ConsentTests(unittest.TestCase):
         )
 
         self.assertFalse(record.matches(scope, now=NOW))
+
+    def test_naive_consent_timestamps_are_rejected_and_invalid_constructed_record_fails_closed(self) -> None:
+        """Comparing naive and aware timestamps must never authorize access or crash."""
+        scope = SecretAccessScope(
+            operation=SecretOperation.GET,
+            secret_reference="qq-token",
+            secret_backend="memory",
+            source_id="qq",
+            account_id="account-1",
+            client_version="9.9.0",
+            tool_version="1.2.3",
+            account_version="account-v1",
+            configuration_nonce="configuration-1",
+        )
+        with self.assertRaisesRegex(ValueError, "timezone-aware"):
+            ConsentRecord(
+                scope_fingerprint=scope.fingerprint(),
+                granted=True,
+                recorded_at=datetime(2026, 9, 10),
+                expires_at=NOW + timedelta(minutes=5),
+            )
+        invalid = ConsentRecord.model_construct(
+            scope_fingerprint=scope.fingerprint(),
+            granted=True,
+            recorded_at=datetime(2026, 9, 10),
+            expires_at=NOW + timedelta(minutes=5),
+        )
+        self.assertFalse(invalid.matches(scope, now=NOW))

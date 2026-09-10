@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from secrets import token_urlsafe
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -38,6 +39,7 @@ class SourceCapability(BaseModel):
     status: SourceStatus = SourceStatus.UNCONFIGURED
     document_reviewed: bool = False
     verified_fingerprint: SourceFingerprint | None = Field(default=None, repr=False)
+    configuration_nonce: str | None = Field(default=None, repr=False)
     blocked_reason: str | None = None
     fallback_source_id: None = None
 
@@ -53,6 +55,7 @@ class SourceCapability(BaseModel):
 
     def mark_document_reviewed(self) -> "SourceCapability":
         """Record documentation only; it is never operational verification."""
+        self._reject_terminal_state_change()
         return self.model_copy(
             update={
                 "document_reviewed": True,
@@ -62,14 +65,21 @@ class SourceCapability(BaseModel):
             }
         )
 
-    def transition_to(self, status: SourceStatus) -> "SourceCapability":
-        """Permit non-ready informational transitions without inventing evidence."""
-        if status is SourceStatus.READY:
-            raise ValueError("ready status requires a verified fingerprint")
-        if status is SourceStatus.BLOCKED:
-            raise ValueError("blocked status requires explicit requirements evaluation")
+    def start_configuration(self) -> "SourceCapability":
+        """Begin a fresh session; this is the sole route out of terminal states."""
         return self.model_copy(
-            update={"status": status, "verified_fingerprint": None, "blocked_reason": None}
+            update={
+                "status": SourceStatus.UNCONFIGURED,
+                "configuration_nonce": token_urlsafe(32),
+                "verified_fingerprint": None,
+                "blocked_reason": None,
+            }
+        )
+
+    def mark_unsupported(self) -> "SourceCapability":
+        """Explicitly stop configuration when the source is unsupported."""
+        return self.model_copy(
+            update={"status": SourceStatus.UNSUPPORTED, "verified_fingerprint": None}
         )
 
     def record_verification(
@@ -83,6 +93,8 @@ class SourceCapability(BaseModel):
         """Only a successful, versioned verification can make a source ready."""
         if self.status in {SourceStatus.BLOCKED, SourceStatus.UNSUPPORTED}:
             raise ValueError("blocked or unsupported source cannot be verified")
+        if self.configuration_nonce is None:
+            raise ValueError("ready status requires a configuration session")
         if fingerprint != current_fingerprint:
             raise ValueError("verification fingerprint must match the current fingerprint")
         if (
@@ -91,6 +103,7 @@ class SourceCapability(BaseModel):
             or export_scope.client_version != fingerprint.client_version
             or export_scope.tool_version != fingerprint.tool_version
             or export_scope.account_version != fingerprint.account_version
+            or export_scope.configuration_nonce != self.configuration_nonce
             or not export_consent.matches(export_scope)
         ):
             raise ValueError("ready status requires approved export consent")
@@ -113,6 +126,10 @@ class SourceCapability(BaseModel):
                 "blocked_reason": None,
             }
         )
+
+    def _reject_terminal_state_change(self) -> None:
+        if self.status in {SourceStatus.BLOCKED, SourceStatus.UNSUPPORTED}:
+            raise ValueError("terminal source state requires a fresh configuration session")
 
     def evaluate_requirements(
         self, *, user_approved: bool, requirements_safe: bool

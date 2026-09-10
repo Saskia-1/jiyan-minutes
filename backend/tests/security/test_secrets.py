@@ -9,7 +9,9 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from uuid import uuid4
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from io import StringIO
@@ -40,6 +42,7 @@ def access(operation: SecretOperation, backend: str = "memory", **changes: str) 
         "client_version": "9.9.0",
         "tool_version": "1.2.3",
         "account_version": "account-v1",
+        "configuration_nonce": "configuration-1",
     }
     values.update(changes)
     return SecretAccessScope(**values)
@@ -56,13 +59,13 @@ class ExplodingRunner:
 
 class CapturingRunner:
     def __init__(self) -> None:
-        self.args: tuple[str, ...] | None = None
-        self.input: str | None = None
+        self.calls: list[tuple[tuple[str, ...], str | None]] = []
+        self.stdout = ""
 
     def run(self, args: list[str], **kwargs: object) -> object:
-        self.args = tuple(args)
-        self.input = kwargs.get("input") if isinstance(kwargs.get("input"), str) else None
-        return object()
+        supplied = kwargs.get("input") if isinstance(kwargs.get("input"), str) else None
+        self.calls.append((tuple(args), supplied))
+        return type("Result", (), {"stdout": self.stdout})()
 
 
 class SecretStoreTests(unittest.TestCase):
@@ -139,11 +142,31 @@ class SecretStoreTests(unittest.TestCase):
 
         write_access = access(SecretOperation.SET, backend="keychain")
         store.set(access=write_access, consent=grant(write_access), value=SENTINEL)
+        read_access = access(SecretOperation.GET, backend="keychain")
+        runner.stdout = SENTINEL + "\n"
+        self.assertEqual(store.get(access=read_access, consent=grant(read_access)), SENTINEL)
+        delete_access = access(SecretOperation.DELETE, backend="keychain")
+        store.delete(access=delete_access, consent=grant(delete_access))
 
-        self.assertIsNotNone(runner.args)
-        self.assertNotIn(SENTINEL, runner.args or ())
-        self.assertEqual((runner.args or (None,))[-1], "-w")
-        self.assertEqual(runner.input, SENTINEL)
+        write_command, write_input = runner.calls[0]
+        read_command, read_input = runner.calls[1]
+        delete_command, delete_input = runner.calls[2]
+        self.assertEqual(
+            write_command,
+            ("/usr/bin/security", "add-generic-password", "-a", "qq-token", "-s", "chat-to-howto", "-U", "-w"),
+        )
+        self.assertEqual(
+            read_command,
+            ("/usr/bin/security", "find-generic-password", "-a", "qq-token", "-s", "chat-to-howto", "-w"),
+        )
+        self.assertEqual(
+            delete_command,
+            ("/usr/bin/security", "delete-generic-password", "-a", "qq-token", "-s", "chat-to-howto"),
+        )
+        self.assertNotIn(SENTINEL, write_command)
+        self.assertEqual(write_input, SENTINEL)
+        self.assertIsNone(read_input)
+        self.assertIsNone(delete_input)
         with self.assertRaises(SecretStoreError) as raised:
             KeychainSecretStore(service="chat-to-howto", runner=ExplodingRunner()).set(
                 access=write_access, consent=grant(write_access), value=SENTINEL
@@ -175,49 +198,73 @@ class SecretStoreTests(unittest.TestCase):
             self.assertEqual(os.stat(fallback_root).st_mode & 0o777, 0o700)
             self.assertEqual(os.stat(next(fallback_root.iterdir())).st_mode & 0o777, 0o600)
 
+    def test_password_prompt_timeout_kills_hung_child_without_disclosing_value(self) -> None:
+        """A nonresponsive Keychain prompt must not leave a process or leak its input."""
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_file = Path(temporary) / "child.pid"
+            child_code = (
+                "from pathlib import Path; import os, time; "
+                f"Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(60)"
+            )
+            started = time.monotonic()
+            with self.assertRaises(TimeoutError) as raised:
+                KeychainSecretStore._run_password_prompt(
+                    [sys.executable, "-c", child_code],
+                    SENTINEL,
+                    timeout_seconds=0.05,
+                )
+            self.assertLess(time.monotonic() - started, 2)
+            self.assertNotIn(SENTINEL, str(raised.exception))
+            child_pid = int(pid_file.read_text())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(child_pid, 0)
+
+    def test_password_prompt_waits_for_two_phases_and_sends_the_value_twice(self) -> None:
+        """Keychain's add command requires password entry and confirmation prompts."""
+        child_code = (
+            "import sys, time; "
+            "time.sleep(0.05); "
+            "sys.stdout.write('password data for new item: '); sys.stdout.flush(); "
+            "first = sys.stdin.readline().rstrip('\\n'); "
+            "sys.stdout.write('retype password for new item: '); sys.stdout.flush(); "
+            "second = sys.stdin.readline().rstrip('\\n'); "
+            "raise SystemExit(0 if first == second else 3)"
+        )
+
+        result = KeychainSecretStore._run_password_prompt(
+            [sys.executable, "-c", child_code],
+            "synthetic-" + "prompt-value",
+            timeout_seconds=1.0,
+        )
+
+        self.assertEqual(result.returncode, 0)
+
 
 @unittest.skipUnless(
-    sys.platform == "darwin" and os.getenv("RUN_KEYCHAIN_INTEGRATION") == "1",
-    "set RUN_KEYCHAIN_INTEGRATION=1 on macOS to run the isolated Keychain integration",
+    sys.platform == "darwin" and os.getenv("RUN_LOGIN_KEYCHAIN_INTEGRATION") == "1",
+    "set RUN_LOGIN_KEYCHAIN_INTEGRATION=1 on macOS to run the default-login Keychain integration",
 )
 class KeychainIntegrationTests(unittest.TestCase):
-    def test_temporary_keychain_set_get_delete_never_emits_the_synthetic_value(self) -> None:
-        """The password prompt path must work without the default Keychain or argv secrets."""
+    def test_default_login_keychain_set_get_delete_never_emits_the_synthetic_value(self) -> None:
+        """The real default-login path must use a unique synthetic service and clean up."""
         integration_secret = "synthetic-" + "keychain-" + "secret"
         captured_stdout = StringIO()
         captured_stderr = StringIO()
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
-            keychain_path = Path(temporary) / "chat-to-howto-test.keychain-db"
-            subprocess.run(
-                ["security", "create-keychain", "-p", "", str(keychain_path)],
-                check=True,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            subprocess.run(
-                ["security", "unlock-keychain", "-p", "", str(keychain_path)],
-                check=True,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            self.addCleanup(
-                lambda: subprocess.run(
-                    ["security", "delete-keychain", str(keychain_path)],
-                    check=False,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-            )
-            store = KeychainSecretStore(
-                service="chat-to-howto-integration", keychain_path=keychain_path
-            )
-            write_access = access(SecretOperation.SET, backend="keychain")
-            read_access = access(SecretOperation.GET, backend="keychain")
-            delete_access = access(SecretOperation.DELETE, backend="keychain")
+        integration_id = uuid4().hex
+        service = f"chat-to-howto-integration-{integration_id}"
+        reference = f"account-{integration_id}"
+        store = KeychainSecretStore(service=service)
+        write_access = access(
+            SecretOperation.SET, backend="keychain", secret_reference=reference
+        )
+        read_access = access(
+            SecretOperation.GET, backend="keychain", secret_reference=reference
+        )
+        delete_access = access(
+            SecretOperation.DELETE, backend="keychain", secret_reference=reference
+        )
 
+        try:
             with redirect_stdout(captured_stdout), redirect_stderr(captured_stderr):
                 store.set(access=write_access, consent=grant(write_access), value=integration_secret)
                 self.assertEqual(
@@ -226,5 +273,13 @@ class KeychainIntegrationTests(unittest.TestCase):
                 store.delete(access=delete_access, consent=grant(delete_access))
                 with self.assertRaises(SecretStoreError):
                     store.get(access=read_access, consent=grant(read_access))
+        finally:
+            subprocess.run(
+                ["/usr/bin/security", "delete-generic-password", "-a", reference, "-s", service],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
         self.assertNotIn(integration_secret, captured_stdout.getvalue())
         self.assertNotIn(integration_secret, captured_stderr.getvalue())

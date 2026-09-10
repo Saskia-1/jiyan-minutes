@@ -8,7 +8,7 @@ from hashlib import sha256
 import json
 from typing import Protocol
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 
 class ConsentScope(BaseModel):
@@ -26,6 +26,7 @@ class ConsentScope(BaseModel):
     client_version: str | None = None
     tool_version: str | None = None
     account_version: str | None = None
+    configuration_nonce: str
 
     def fingerprint(self) -> str:
         """Return a stable digest without reusing consent across changed inputs."""
@@ -56,6 +57,7 @@ class SecretAccessScope(BaseModel):
     client_version: str
     tool_version: str
     account_version: str
+    configuration_nonce: str
 
     def fingerprint(self) -> str:
         payload = json.dumps(
@@ -77,6 +79,14 @@ class ConsentRecord(BaseModel):
     granted: bool
     recorded_at: datetime
     expires_at: datetime
+
+    @model_validator(mode="after")
+    def _validate_aware_timestamps(self) -> "ConsentRecord":
+        if not _is_timezone_aware(self.recorded_at) or not _is_timezone_aware(self.expires_at):
+            raise ValueError("consent timestamps must be timezone-aware")
+        if self.expires_at <= self.recorded_at:
+            raise ValueError("consent expiry must be after its recorded time")
+        return self
 
     @classmethod
     def grant(
@@ -112,8 +122,21 @@ class ConsentRecord(BaseModel):
 
     def matches(self, scope: FingerprintedScope, *, now: datetime | None = None) -> bool:
         current_time = now or datetime.now(timezone.utc)
-        return (
-            self.granted
-            and current_time < self.expires_at
-            and self.scope_fingerprint == scope.fingerprint()
-        )
+        try:
+            if not (
+                _is_timezone_aware(self.recorded_at)
+                and _is_timezone_aware(self.expires_at)
+                and _is_timezone_aware(current_time)
+            ):
+                return False
+            return (
+                self.granted
+                and current_time < self.expires_at
+                and self.scope_fingerprint == scope.fingerprint()
+            )
+        except (AttributeError, TypeError, ValueError):
+            return False
+
+
+def _is_timezone_aware(value: datetime) -> bool:
+    return value.tzinfo is not None and value.utcoffset() is not None

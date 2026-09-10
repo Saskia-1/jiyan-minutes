@@ -20,7 +20,7 @@ from chat_to_howto.domain.consent import ConsentRecord, ConsentScope
 NOW = datetime.now(timezone.utc)
 
 
-def verification_scope(fingerprint: SourceFingerprint) -> ConsentScope:
+def verification_scope(fingerprint: SourceFingerprint, configuration_nonce: str) -> ConsentScope:
     return ConsentScope(
         source_id="wechat",
         account_id="account-1",
@@ -32,11 +32,14 @@ def verification_scope(fingerprint: SourceFingerprint) -> ConsentScope:
         client_version=fingerprint.client_version,
         tool_version=fingerprint.tool_version,
         account_version=fingerprint.account_version,
+        configuration_nonce=configuration_nonce,
     )
 
 
-def approved_export_consent(fingerprint: SourceFingerprint) -> tuple[ConsentScope, ConsentRecord]:
-    scope = verification_scope(fingerprint)
+def approved_export_consent(
+    fingerprint: SourceFingerprint, configuration_nonce: str
+) -> tuple[ConsentScope, ConsentRecord]:
+    scope = verification_scope(fingerprint, configuration_nonce)
     return scope, ConsentRecord.grant(scope, expires_at=NOW + timedelta(minutes=5), now=NOW)
 
 
@@ -46,16 +49,16 @@ class SourceCapabilityTests(unittest.TestCase):
         capability = SourceCapability(source_id="qq").mark_document_reviewed()
 
         self.assertEqual(capability.status, SourceStatus.DOCUMENTED_NOT_TESTED)
-        with self.assertRaisesRegex(ValueError, "verified fingerprint"):
-            capability.transition_to(SourceStatus.READY)
+        self.assertFalse(hasattr(capability, "transition_to"))
 
     def test_changed_client_tool_or_account_version_invalidates_a_ready_verification(self) -> None:
         """Keeping ready after a client, tool, or account change would be stale."""
         fingerprint = SourceFingerprint(
             client_version="9.9.0", tool_version="1.2.3", account_version="account-v1"
         )
-        scope, consent = approved_export_consent(fingerprint)
-        capability = SourceCapability(source_id="wechat").record_verification(
+        configuring = SourceCapability(source_id="wechat").start_configuration()
+        scope, consent = approved_export_consent(fingerprint, configuring.configuration_nonce)
+        capability = configuring.record_verification(
             fingerprint,
             current_fingerprint=fingerprint,
             export_scope=scope,
@@ -79,8 +82,8 @@ class SourceCapabilityTests(unittest.TestCase):
         fingerprint = SourceFingerprint(
             client_version="9.9.0", tool_version="1.2.3", account_version="account-v1"
         )
-        scope, consent = approved_export_consent(fingerprint)
-        capability = SourceCapability(source_id="wechat")
+        capability = SourceCapability(source_id="wechat").start_configuration()
+        scope, consent = approved_export_consent(fingerprint, capability.configuration_nonce)
 
         with self.assertRaisesRegex(ValueError, "current fingerprint"):
             capability.record_verification(
@@ -103,15 +106,16 @@ class SourceCapabilityTests(unittest.TestCase):
         fingerprint = SourceFingerprint(
             client_version="9.9.0", tool_version="1.2.3", account_version="account-v1"
         )
-        scope, consent = approved_export_consent(fingerprint)
+        configured = SourceCapability(source_id="wechat").start_configuration()
+        scope, consent = approved_export_consent(fingerprint, configured.configuration_nonce)
         states = (
-            SourceCapability(source_id="wechat").evaluate_requirements(
+            configured.evaluate_requirements(
                 user_approved=False, requirements_safe=True
             ),
-            SourceCapability(source_id="wechat").evaluate_requirements(
+            configured.evaluate_requirements(
                 user_approved=True, requirements_safe=False
             ),
-            SourceCapability(source_id="wechat").transition_to(SourceStatus.UNSUPPORTED),
+            configured.mark_unsupported(),
         )
 
         for capability in states:
@@ -123,6 +127,42 @@ class SourceCapabilityTests(unittest.TestCase):
                         export_scope=scope,
                         export_consent=consent,
                     )
+
+    def test_reconfiguration_invalidates_old_consent_after_blocked_or_unsupported(self) -> None:
+        """A terminal safety state needs a fresh configuration session before ready."""
+        fingerprint = SourceFingerprint(
+            client_version="9.9.0", tool_version="1.2.3", account_version="account-v1"
+        )
+        configured = SourceCapability(source_id="wechat").start_configuration()
+        old_scope, old_consent = approved_export_consent(
+            fingerprint, configured.configuration_nonce
+        )
+        terminal_states = (
+            configured.evaluate_requirements(user_approved=False, requirements_safe=True),
+            configured.mark_unsupported(),
+        )
+
+        for terminal in terminal_states:
+            with self.subTest(status=terminal.status):
+                reconfigured = terminal.start_configuration()
+                self.assertNotEqual(reconfigured.configuration_nonce, configured.configuration_nonce)
+                with self.assertRaisesRegex(ValueError, "approved export consent"):
+                    reconfigured.record_verification(
+                        fingerprint,
+                        current_fingerprint=fingerprint,
+                        export_scope=old_scope,
+                        export_consent=old_consent,
+                    )
+                new_scope, new_consent = approved_export_consent(
+                    fingerprint, reconfigured.configuration_nonce
+                )
+                ready = reconfigured.record_verification(
+                    fingerprint,
+                    current_fingerprint=fingerprint,
+                    export_scope=new_scope,
+                    export_consent=new_consent,
+                )
+                self.assertEqual(ready.status, SourceStatus.READY)
 
     def test_declined_requirement_blocks_without_a_fallback(self) -> None:
         """Falling back after a declined operation could bypass user choice."""

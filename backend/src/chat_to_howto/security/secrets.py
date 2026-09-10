@@ -6,7 +6,10 @@ import logging
 import os
 from pathlib import Path
 import pty
+import select
+import signal
 import subprocess
+import time
 import tty
 from typing import Protocol
 
@@ -137,13 +140,15 @@ class KeychainSecretStore:
         self,
         *,
         service: str,
-        keychain_path: Path | None = None,
         runner: CommandRunner | None = None,
+        prompt_timeout_seconds: float = 5.0,
     ) -> None:
+        if prompt_timeout_seconds <= 0:
+            raise ValueError("prompt timeout must be positive")
         self._service = service
-        self._keychain_path = keychain_path
         self._runner = runner or subprocess
         self._uses_system_runner = runner is None
+        self._prompt_timeout_seconds = prompt_timeout_seconds
 
     def __repr__(self) -> str:
         return "<KeychainSecretStore backend='keychain'>"
@@ -154,8 +159,7 @@ class KeychainSecretStore:
         )
         result = self._run(
             self._command(
-                ["find-generic-password", "-a", access.secret_reference, "-s", self._service],
-                prompt_password=False,
+                ["find-generic-password", "-a", access.secret_reference, "-s", self._service, "-w"]
             )
         )
         value = getattr(result, "stdout", "")
@@ -169,8 +173,7 @@ class KeychainSecretStore:
         )
         self._run(
             self._command(
-                ["add-generic-password", "-a", access.secret_reference, "-s", self._service, "-U"],
-                prompt_password=True,
+                ["add-generic-password", "-a", access.secret_reference, "-s", self._service, "-U", "-w"]
             ),
             input=value,
         )
@@ -181,23 +184,20 @@ class KeychainSecretStore:
         )
         self._run(
             self._command(
-                ["delete-generic-password", "-a", access.secret_reference, "-s", self._service],
-                prompt_password=False,
+                ["delete-generic-password", "-a", access.secret_reference, "-s", self._service]
             )
         )
 
-    def _command(self, arguments: list[str], *, prompt_password: bool) -> list[str]:
-        command = ["security", *arguments]
-        if self._keychain_path is not None:
-            command.append(str(self._keychain_path))
-        if prompt_password:
-            command.append("-w")
-        return command
+    @staticmethod
+    def _command(arguments: list[str]) -> list[str]:
+        return ["/usr/bin/security", *arguments]
 
     def _run(self, args: list[str], *, input: str | None = None) -> object:
         try:
             if input is not None and self._uses_system_runner:
-                return self._run_password_prompt(args, input)
+                return self._run_password_prompt(
+                    args, input, timeout_seconds=self._prompt_timeout_seconds
+                )
             return self._runner.run(
                 args,
                 input=input,
@@ -211,31 +211,61 @@ class KeychainSecretStore:
             raise SecretStoreError("Secure storage operation failed.") from None
 
     @staticmethod
-    def _run_password_prompt(args: list[str], value: str) -> subprocess.CompletedProcess[str]:
+    def _run_password_prompt(
+        args: list[str], value: str, *, timeout_seconds: float
+    ) -> subprocess.CompletedProcess[str]:
         """Feed the `security -w` prompt through a TTY, never an argv element."""
+        prompts = (b"password data for new item: ", b"retype password for new item: ")
         child_pid, master_fd = pty.fork()
         if child_pid == 0:
             os.execvp(args[0], args)
+        reaped = False
         try:
             tty.setraw(master_fd)
-            os.write(master_fd, f"{value}\n".encode("utf-8"))
-            output = bytearray()
+            deadline = time.monotonic() + timeout_seconds
+            prompt_index = 0
+            pending_output = bytearray()
             while True:
+                completed_pid, status = os.waitpid(child_pid, os.WNOHANG)
+                if completed_pid == child_pid:
+                    reaped = True
+                    return_code = os.waitstatus_to_exitcode(status)
+                    if return_code or prompt_index != len(prompts):
+                        raise subprocess.CalledProcessError(
+                            return_code or 1, args, output=b"", stderr=b""
+                        )
+                    return subprocess.CompletedProcess(args, return_code, "", "")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Secure storage prompt timed out.")
+                readable, _, _ = select.select([master_fd], [], [], remaining)
+                if not readable:
+                    raise TimeoutError("Secure storage prompt timed out.")
                 try:
-                    chunk = os.read(master_fd, 4096)
+                    pending_output.extend(os.read(master_fd, 4096))
                 except OSError:
-                    break
-                if not chunk:
-                    break
-                output.extend(chunk)
-            _, status = os.waitpid(child_pid, 0)
-            return_code = os.waitstatus_to_exitcode(status)
-            if return_code:
-                raise subprocess.CalledProcessError(
-                    return_code, args, output=bytes(output), stderr=b""
-                )
-            return subprocess.CompletedProcess(args, return_code, "", "")
+                    continue
+                while prompt_index < len(prompts):
+                    prompt = prompts[prompt_index]
+                    position = pending_output.find(prompt)
+                    if position < 0:
+                        max_prefix = max(len(item) for item in prompts) - 1
+                        if len(pending_output) > max_prefix:
+                            del pending_output[:-max_prefix]
+                        break
+                    del pending_output[: position + len(prompt)]
+                    os.write(master_fd, f"{value}\n".encode("utf-8"))
+                    prompt_index += 1
         finally:
+            if not reaped:
+                try:
+                    os.kill(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    os.waitpid(child_pid, 0)
+                except ChildProcessError:
+                    pass
             os.close(master_fd)
 
 
