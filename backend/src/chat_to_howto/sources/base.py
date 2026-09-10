@@ -73,9 +73,11 @@ class CompletenessEvidence:
     occurrence does not prevent accepting a later valid occurrence. Error
     counters may overlap: a record can lack both time and ID.
     Warnings are fixed codes and must contain no upstream body data.
+    Only independently verified source coverage may use source_range_verified;
+    successful requests or exhausted pagination do not establish that status.
     """
 
-    status: Literal["complete", "partial", "unknown", "empty"]
+    status: Literal["source_range_verified", "partial", "unknown", "empty"]
     reason: str
     duplicate_count: int | None = None
     requested_start_ms: int | None = None

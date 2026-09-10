@@ -7,12 +7,13 @@ from dataclasses import FrozenInstanceError
 import sys
 import unittest
 from pathlib import Path
+from typing import get_args, get_type_hints
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from chat_to_howto.domain.consent import ConsentRecord, SecretAccessScope, SecretOperation
 from chat_to_howto.security.secrets import InMemorySecretStore
-from chat_to_howto.sources.base import FetchCancelled, PaginationError, SourceAdapterError, UpstreamProtocolError
+from chat_to_howto.sources.base import CompletenessEvidence, FetchCancelled, PaginationError, SourceAdapterError, UpstreamProtocolError
 from chat_to_howto.sources.qce import QceAdapter
 
 
@@ -67,6 +68,100 @@ def adapter(responses: list[dict[str, object]]) -> tuple[QceAdapter, RecordingTr
 
 
 class QceContractTests(unittest.TestCase):
+    def test_verified_status_uses_the_shared_source_range_vocabulary(self) -> None:
+        statuses = get_args(get_type_hints(CompletenessEvidence)["status"])
+        self.assertEqual(set(statuses), {"source_range_verified", "partial", "unknown", "empty"})
+
+    def test_cancel_during_secret_read_prevents_the_transport_call(self) -> None:
+        for operation in ("list_conversations", "fetch_range"):
+            with self.subTest(operation=operation):
+                source, transport = adapter([])
+                original = source._store.get
+                def cancelling_secret_read(**kwargs):
+                    token = original(**kwargs)
+                    source.cancel()
+                    return token
+                source._store.get = cancelling_secret_read
+                with self.assertRaises(FetchCancelled):
+                    if operation == "fetch_range":
+                        source.fetch_range("friend:peer", 0, 10)
+                    else:
+                        source.list_conversations()
+                self.assertEqual(transport.calls, [])
+
+    def test_rejects_responses_exceeding_the_requested_page_limit(self) -> None:
+        for key, entry in (("messages", {"msgId": "a", "msgTime": 0}), ("friends", {"uid": "a"}), ("groups", {"groupCode": "a"})):
+            with self.subTest(key=key):
+                responses = []
+                if key == "groups":
+                    responses.append({"success": True, "data": {"friends": [], "currentPage": 1, "hasNext": False}})
+                responses.append({"success": True, "data": {key: [entry] * 2001, "currentPage": 1, "hasNext": False}})
+                source, transport = adapter(responses)
+                with self.assertRaises(PaginationError):
+                    if key == "messages":
+                        source.fetch_range("friend:peer", 0, 10)
+                    else:
+                        source.list_conversations()
+                self.assertEqual(len(transport.calls), len(responses))
+
+    def test_raw_message_budget_counts_duplicates_and_stops_before_next_page(self) -> None:
+        responses = [
+            {"success": True, "data": {"messages": [{"msgId": "same", "msgTime": 0}] * 2000, "currentPage": page, "hasNext": True}}
+            for page in range(1, 11)
+        ]
+        source, transport = adapter(responses)
+        with self.assertRaises(PaginationError):
+            source.fetch_range("friend:peer", 0, 10)
+        self.assertEqual(len(transport.calls), 10)
+
+    def test_budget_never_changes_page_size_and_therefore_page_offsets(self) -> None:
+        source, transport = adapter([
+            {"success": True, "data": {"messages": [{"msgId": "same", "msgTime": 0}] * (1999 if page == 1 else 2000), "currentPage": page, "hasNext": True}}
+            for page in range(1, 11)
+        ])
+        with self.assertRaises(PaginationError):
+            source.fetch_range("friend:peer", 0, 10)
+        self.assertEqual(len(transport.calls), 10)
+        self.assertEqual([call[4]["limit"] for call in transport.calls], [2000] * 10)
+
+    def test_enumeration_raw_budget_is_shared_across_friends_and_groups(self) -> None:
+        responses = [
+            {"success": True, "data": {"friends": [{"uid": "same"}] * 2000, "currentPage": page, "hasNext": page < 3}}
+            for page in range(1, 4)
+        ]
+        responses.extend(
+            {"success": True, "data": {"groups": [{"groupCode": "same"}] * 2000, "currentPage": page, "hasNext": True}}
+            for page in range(1, 3)
+        )
+        source, transport = adapter(responses)
+        with self.assertRaises(PaginationError):
+            source.list_conversations()
+        self.assertEqual(len(transport.calls), 5)
+
+    def test_empty_continuation_pages_are_bounded(self) -> None:
+        for key, max_pages in (("messages", 20), ("friends", 10)):
+            with self.subTest(key=key):
+                source, transport = adapter([
+                    {"success": True, "data": {key: [], "currentPage": page, "hasNext": True}}
+                    for page in range(1, max_pages + 1)
+                ])
+                with self.assertRaises(PaginationError):
+                    if key == "messages":
+                        source.fetch_range("friend:peer", 0, 10)
+                    else:
+                        source.list_conversations()
+                self.assertEqual(len(transport.calls), max_pages)
+
+    def test_recent_contacts_obey_the_explicit_response_limit(self) -> None:
+        source, transport = adapter([
+            {"success": True, "data": {"friends": [], "currentPage": 1, "hasNext": False}},
+            {"success": True, "data": {"groups": [], "currentPage": 1, "hasNext": False}},
+            {"success": True, "data": {"contacts": [{"peerUid": "a", "chatType": 1}] * 101}},
+        ])
+        with self.assertRaises(PaginationError):
+            source.list_conversations()
+        self.assertEqual(len(transport.calls), 3)
+
     def test_rejected_id_occurrence_cannot_hide_later_usable_record(self) -> None:
         source, _ = adapter([
             {"success": True, "data": {"currentPage": 1, "hasNext": True, "messages": [

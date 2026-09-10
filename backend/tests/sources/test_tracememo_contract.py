@@ -308,6 +308,41 @@ def test_fractional_empty_range_still_discloses_upstream_second_precision():
     assert "second_precision_boundaries" in evidence.warnings
 
 
+def test_declared_count_mismatch_does_not_hide_an_empty_unproven_response():
+    source, _ = selected([{"count": 10, "messages": []}])
+    page = source.fetch_range(TALKER, 100_000, 101_000)
+    evidence = page.completeness
+    assert page.messages == ()
+    assert evidence.status == "unknown"
+    assert evidence.fetched_count == evidence.accepted_count == 0
+    assert evidence.slices[0].returned == 0
+    assert evidence.warnings == (
+        "tracememo_history_unproven", "upstream_count_mismatch"
+    )
+
+
+@pytest.mark.parametrize("count", [True, False, -1, "10", None, 1.0])
+def test_invalid_declared_counts_raise_body_free_protocol_errors(count):
+    source, _ = selected([{"count": count, "messages": [], "body": SENTINEL}])
+    with pytest.raises(UpstreamProtocolError) as raised:
+        source.fetch_range(TALKER, 100_000, 101_000)
+    assert_safe_error(raised.value, UpstreamProtocolError)
+
+
+@pytest.mark.parametrize("count", [0, 2])
+def test_matching_declared_count_compares_raw_records_not_accepted_messages(count):
+    raw = [
+        {"id": "before", "createTime": 99},
+        {"id": "inside", "createTime": 100},
+    ] if count else []
+    source, _ = selected([{"count": count, "messages": raw}])
+    evidence = source.fetch_range(TALKER, 100_000, 101_000).completeness
+    assert evidence.status == "unknown"
+    assert evidence.fetched_count == count
+    assert evidence.accepted_count == (1 if count else 0)
+    assert evidence.warnings == ("tracememo_history_unproven",)
+
+
 @pytest.mark.parametrize(
     "operation", ["health", "list_accounts", "list_conversations", "fetch_range"]
 )

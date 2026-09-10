@@ -6,6 +6,7 @@ import sys
 import unittest
 from collections.abc import Callable, Iterable
 from pathlib import Path
+from unittest import mock
 
 import httpx
 
@@ -38,27 +39,38 @@ class ChunkedStream(httpx.SyncByteStream):
         pass
 
 
-def mock_client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.Client:
-    return httpx.Client(
-        transport=httpx.MockTransport(handler),
-        follow_redirects=False,
-        trust_env=False,
-        timeout=httpx.Timeout(5.0),
-    )
+def mock_transport(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.MockTransport:
+    return httpx.MockTransport(handler)
 
 
-def qce_transport(client: httpx.Client, *, cap: int = 1_048_576) -> LoopbackTransport:
+def qce_transport(
+    test_transport: httpx.MockTransport, *, cap: int = 1_048_576
+) -> LoopbackTransport:
     return LoopbackTransport(
         "http://127.0.0.1:40653",
         expected_port=40653,
         source="qce",
         resolver=lambda _host: ("127.0.0.1",),
-        client=client,
+        mock_transport=test_transport,
         max_body_bytes=cap,
     )
 
 
 class LoopbackTransportTests(unittest.TestCase):
+    def test_rejects_complete_http_clients_as_injection(self) -> None:
+        """A configured client could add proxy, auth, cookies, or hooks after validation."""
+        client = httpx.Client(follow_redirects=False, trust_env=False, timeout=httpx.Timeout(5.0))
+        try:
+            with self.assertRaises(TypeError):
+                LoopbackTransport(
+                    "http://127.0.0.1:40653",
+                    expected_port=40653,
+                    source="qce",
+                    client=client,
+                )
+        finally:
+            client.close()
+
     def test_rejects_empty_raw_url_delimiters_before_httpx_normalizes_them(self) -> None:
         """Parser-normalized empty userinfo/query/fragment must not be accepted."""
         for target in (
@@ -69,19 +81,55 @@ class LoopbackTransportTests(unittest.TestCase):
             with self.subTest(target=target), self.assertRaises(UnsafeLoopbackTarget):
                 LoopbackTransport(target, expected_port=40653)
 
+    def test_mock_transport_observes_the_fixed_origin_path_query_and_headers(self) -> None:
+        """Test injection cannot hide a changed origin or credential-bearing request."""
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            self.assertEqual(request.url.scheme, "http")
+            self.assertEqual(request.url.host, "127.0.0.1")
+            self.assertEqual(request.url.port, 40653)
+            self.assertNotIn("cookie", request.headers)
+            self.assertNotIn("x-api-key", request.headers)
+            if request.url.path == "/health":
+                self.assertEqual(str(request.url), "http://127.0.0.1:40653/health")
+                self.assertEqual(request.url.raw_path, b"/health")
+                self.assertNotIn("authorization", request.headers)
+            else:
+                self.assertEqual(str(request.url), "http://127.0.0.1:40653/api/friends?page=1")
+                self.assertEqual(request.url.raw_path, b"/api/friends?page=1")
+                self.assertEqual(request.headers["authorization"], "Bearer fixture-credential")
+            return httpx.Response(200, json={"success": True})
+
+        transport = qce_transport(mock_transport(handler))
+        self.assertEqual(transport.request("GET", "/health", headers={}), {"success": True})
+        self.assertEqual(
+            transport.request(
+                "GET",
+                "/api/friends",
+                headers={"Authorization": "Bearer fixture-credential"},
+                params={"page": 1},
+            ),
+            {"success": True},
+        )
+        self.assertEqual(len(seen), 2)
+
     def test_default_source_contract_fails_closed_and_only_allows_locked_routes(self) -> None:
         """An unbound or broadened transport could send or administrate upstream data."""
-        client = mock_client(lambda _request: httpx.Response(200, json={"success": True}))
+        test_transport = mock_transport(
+            lambda _request: httpx.Response(200, json={"success": True})
+        )
         unbound = LoopbackTransport(
             "http://127.0.0.1:40653",
             expected_port=40653,
             resolver=lambda _host: ("127.0.0.1",),
-            client=client,
+            mock_transport=test_transport,
         )
         with self.assertRaises(UnsafeLoopbackTarget):
             unbound.request("GET", "/health", headers={})
 
-        transport = qce_transport(client)
+        transport = qce_transport(test_transport)
         for method, path in (
             ("get", "/health"),
             ("GET", "/api%2Ffriends"),
@@ -98,7 +146,7 @@ class LoopbackTransportTests(unittest.TestCase):
     def test_qce_allows_only_its_five_locked_request_shapes(self) -> None:
         """Removing one endpoint or adding a generic route breaks the locked QCE contract."""
         transport = qce_transport(
-            mock_client(lambda _request: httpx.Response(200, json={"success": True}))
+            mock_transport(lambda _request: httpx.Response(200, json={"success": True}))
         )
         bearer = {"Authorization": "Bearer fixture-credential"}
         allowed = (
@@ -122,7 +170,9 @@ class LoopbackTransportTests(unittest.TestCase):
             expected_port=6131,
             source="tracememo",
             resolver=lambda _host: ("::1",),
-            client=mock_client(lambda _request: httpx.Response(200, json={"ok": True})),
+            mock_transport=mock_transport(
+                lambda _request: httpx.Response(200, json={"ok": True})
+            ),
         )
         self.assertEqual(transport.request("GET", "/api/v1/health", headers={}), {"ok": True})
         for path in (
@@ -143,7 +193,7 @@ class LoopbackTransportTests(unittest.TestCase):
 
     def test_rejects_query_secrets_and_unapproved_authentication_headers(self) -> None:
         """Credentials outside a Bearer header must never become request metadata."""
-        transport = qce_transport(mock_client(lambda _request: httpx.Response(200, json={})))
+        transport = qce_transport(mock_transport(lambda _request: httpx.Response(200, json={})))
         for params in (
             {"token": SENTINEL},
             {"ACCESS%5FTOKEN": SENTINEL},
@@ -175,9 +225,11 @@ class LoopbackTransportTests(unittest.TestCase):
             seen.append(request)
             return httpx.Response(302, headers={"location": "http://example.test/private"})
 
-        transport = qce_transport(mock_client(handler))
-        with self.assertRaises(RedirectRejected):
+        transport = qce_transport(mock_transport(handler))
+        with self.assertRaises(RedirectRejected) as raised:
             transport.request("GET", "/health", headers={})
+        self.assertIs(type(raised.exception), RedirectRejected)
+        self.assertIsNone(raised.exception.__cause__)
         self.assertEqual(len(seen), 1)
 
     def test_caps_single_and_multiple_chunks_before_caching_past_cap(self) -> None:
@@ -190,7 +242,7 @@ class LoopbackTransportTests(unittest.TestCase):
             with self.subTest(content_length=content_length, chunks=chunks):
                 headers = {} if content_length is None else {"content-length": content_length}
                 transport = qce_transport(
-                    mock_client(
+                    mock_transport(
                         lambda _request, headers=headers, chunks=chunks: httpx.Response(
                             200,
                             headers=headers,
@@ -199,8 +251,10 @@ class LoopbackTransportTests(unittest.TestCase):
                     ),
                     cap=5,
                 )
-                with self.assertRaises(ResponseTooLarge):
+                with self.assertRaises(ResponseTooLarge) as raised:
                     transport.request("GET", "/health", headers={})
+                self.assertIs(type(raised.exception), ResponseTooLarge)
+                self.assertIsNone(raised.exception.__cause__)
 
     def test_maps_malformed_http_and_transport_failures_to_body_free_errors(self) -> None:
         """No upstream body or exception text may cross this boundary."""
@@ -229,31 +283,62 @@ class LoopbackTransportTests(unittest.TestCase):
         )
         for handler, expected in cases:
             with self.subTest(expected=expected.__name__):
-                transport = qce_transport(mock_client(handler))
+                transport = qce_transport(mock_transport(handler))
                 with self.assertRaises(expected) as raised:
                     transport.request("GET", "/health", headers={})
+                self.assertIs(type(raised.exception), expected)
                 self.assertNotIn(SENTINEL, str(raised.exception))
+                self.assertIsNone(raised.exception.__cause__)
 
-    def test_rejects_injected_clients_that_enable_proxy_redirect_or_unbounded_timeout(self) -> None:
-        """Dependency injection must not bypass production network invariants."""
-        unsafe_clients = (
-            httpx.Client(follow_redirects=True, trust_env=False, timeout=httpx.Timeout(5.0)),
-            httpx.Client(follow_redirects=False, trust_env=True, timeout=httpx.Timeout(5.0)),
-            httpx.Client(follow_redirects=False, trust_env=False, timeout=httpx.Timeout(None)),
-            httpx.Client(
-                proxy="http://127.0.0.1:9999",
-                follow_redirects=False,
-                trust_env=False,
-                timeout=httpx.Timeout(5.0),
-            ),
+    def test_sanitizes_dependency_transport_errors_even_when_they_are_typed(self) -> None:
+        """A dependency may forge a public error type with sensitive detail."""
+        transport = qce_transport(
+            mock_transport(
+                lambda _request: (_ for _ in ()).throw(TransportError(SENTINEL))
+            )
         )
-        try:
-            for client in unsafe_clients:
-                with self.subTest(client=client), self.assertRaises(TransportError):
-                    qce_transport(client)
-        finally:
-            for client in unsafe_clients:
-                client.close()
+        with self.assertRaises(TransportError) as raised:
+            transport.request("GET", "/health", headers={})
+        self.assertIs(type(raised.exception), TransportError)
+        self.assertEqual(str(raised.exception), "Source transport failed.")
+        self.assertNotIn(SENTINEL, repr(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
+
+    def test_rejects_deep_json_with_fixed_malformed_error(self) -> None:
+        """Unsafe JSON parser recursion must not escape this response boundary."""
+        nested_json = b"[" * 2_000 + b"0" + b"]" * 2_000
+        self.assertLess(len(nested_json), 4_096)
+        transport = qce_transport(
+            mock_transport(lambda _request: httpx.Response(200, content=nested_json))
+        )
+        with self.assertRaises(MalformedResponse) as raised:
+            transport.request("GET", "/health", headers={})
+        self.assertIs(type(raised.exception), MalformedResponse)
+        self.assertIsNone(raised.exception.__cause__)
+
+    def test_maps_json_memory_errors_to_a_fixed_malformed_error(self) -> None:
+        """A parser allocation failure must not reveal parser or source details."""
+        transport = qce_transport(
+            mock_transport(lambda _request: httpx.Response(200, content=b"{}"))
+        )
+        with mock.patch(
+            "chat_to_howto.sources.transport.json_module.loads",
+            side_effect=MemoryError(SENTINEL),
+        ), self.assertRaises(MalformedResponse) as raised:
+            transport.request("GET", "/health", headers={})
+        self.assertIs(type(raised.exception), MalformedResponse)
+        self.assertNotIn(SENTINEL, repr(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
+
+    def test_rejects_non_mock_network_transports_as_injection(self) -> None:
+        """Only a test double, never a real HTTP transport, is injectable."""
+        with self.assertRaises(TypeError):
+            LoopbackTransport(
+                "http://127.0.0.1:40653",
+                expected_port=40653,
+                source="qce",
+                mock_transport=httpx.HTTPTransport(),
+            )
 
     def test_rejects_resolver_answers_outside_loopback(self) -> None:
         """A resolver hook returning a public address must not weaken loopback-only use."""

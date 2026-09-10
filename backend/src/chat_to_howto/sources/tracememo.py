@@ -120,6 +120,11 @@ class TraceMemoAdapter:
         raw = data.get("messages")
         if not isinstance(raw, list):
             raise UpstreamProtocolError(_PROTOCOL_ERROR) from None
+        declared_count = data.get("count")
+        if "count" in data and (
+            not _integer(declared_count) or declared_count < 0
+        ):
+            raise UpstreamProtocolError(_PROTOCOL_ERROR) from None
 
         result: list[SourceMessage] = []
         seen_ids: set[str] = set()
@@ -154,6 +159,9 @@ class TraceMemoAdapter:
                 )
 
         warnings = ["tracememo_history_unproven"]
+        # The declaration is a consistency check, never measured coverage.
+        if declared_count is not None and declared_count != len(raw):
+            warnings.append("upstream_count_mismatch")
         uncertain_boundary = start_ms % 1000 or end_ms % 1000
         if uncertain_boundary:
             warnings.append("second_precision_boundaries")

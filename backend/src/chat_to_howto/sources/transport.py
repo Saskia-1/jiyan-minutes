@@ -73,7 +73,7 @@ class LoopbackTransport:
         expected_port: int,
         source: str | None = None,
         resolver: Callable[[str], tuple[str, ...]] | None = None,
-        client: httpx.Client | None = None,
+        mock_transport: httpx.MockTransport | None = None,
         timeout_seconds: float = 5.0,
         max_body_bytes: int = 1_048_576,
     ) -> None:
@@ -110,19 +110,18 @@ class LoopbackTransport:
             raise UnsafeLoopbackTarget("Configured source target is unsafe.")
         if resolver is not None and not self._resolver_is_safe(resolver, url.host):
             raise UnsafeLoopbackTarget("Configured source target is unsafe.")
+        if mock_transport is not None and not isinstance(mock_transport, httpx.MockTransport):
+            raise TypeError("mock_transport must be an httpx.MockTransport")
 
         self._url = url
         self._cap = max_body_bytes
         self._allowed_requests = _SOURCE_ALLOWLIST.get(source, frozenset())
-        self._client = client or httpx.Client(
+        self._client = httpx.Client(
+            transport=mock_transport,
             follow_redirects=False,
             trust_env=False,
             timeout=httpx.Timeout(timeout_seconds),
         )
-        if not self._client_is_safe(self._client):
-            if client is None:
-                self._client.close()
-            raise TransportError("Source transport configuration is unsafe.")
 
     def __repr__(self) -> str:
         return "<LoopbackTransport>"
@@ -146,22 +145,26 @@ class LoopbackTransport:
                 json=json,
                 follow_redirects=False,
             ) as response:
-                if 300 <= response.status_code < 400:
-                    raise RedirectRejected("Source redirect rejected.")
-                if response.status_code >= 400:
-                    raise UpstreamHttpError("Source request failed.")
+                status_code = response.status_code
                 body = bytearray()
-                for chunk in response.iter_bytes():
-                    if len(chunk) > self._cap - len(body):
-                        raise ResponseTooLarge("Source response exceeded the configured limit.")
-                    body.extend(chunk)
-        except TransportError:
-            raise
+                body_too_large = False
+                if status_code < 300:
+                    for chunk in response.iter_bytes():
+                        if len(chunk) > self._cap - len(body):
+                            body_too_large = True
+                            break
+                        body.extend(chunk)
         except Exception:
             raise TransportError("Source transport failed.") from None
+        if 300 <= status_code < 400:
+            raise RedirectRejected("Source redirect rejected.")
+        if status_code >= 400:
+            raise UpstreamHttpError("Source request failed.")
+        if body_too_large:
+            raise ResponseTooLarge("Source response exceeded the configured limit.")
         try:
             result = json_module.loads(bytes(body))
-        except (TypeError, UnicodeDecodeError, ValueError):
+        except (MemoryError, RecursionError, TypeError, UnicodeDecodeError, ValueError):
             raise MalformedResponse("Source response was not valid JSON.") from None
         if not isinstance(result, dict):
             raise MalformedResponse("Source response was not valid JSON.")
@@ -180,26 +183,6 @@ class LoopbackTransport:
             return False
         except Exception:
             return False
-
-    @staticmethod
-    def _client_is_safe(client: httpx.Client) -> bool:
-        if not isinstance(client, httpx.Client):
-            return False
-        if client.follow_redirects or getattr(client, "_trust_env", None) is not False:
-            return False
-        timeout = client.timeout
-        if any(
-            value is None
-            or isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(value)
-            or value <= 0
-            for value in (timeout.connect, timeout.read, timeout.write, timeout.pool)
-        ):
-            return False
-        if not isinstance(client._transport, (httpx.HTTPTransport, httpx.MockTransport)):
-            return False
-        return not any(transport is not None for transport in client._mounts.values())
 
     def _validate_request(
         self,

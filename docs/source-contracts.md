@@ -65,6 +65,30 @@ QCE's fetch accepts inclusive millisecond times; the adapter accepts increasing
 integer-millisecond `[start,end)`, sends `end - 1`, and filters locally again.
 It preserves same-timestamp records rather than timestamp-only deduplicating.
 
+The following is the synthetic adapter contract against the reviewed QCE
+source. A field accepted by this adapter is not device-verification evidence.
+
+| Surface | Exact fields and adapter interpretation |
+| --- | --- |
+| Envelope / health | All responses require `success: true` and object `data`. Health requires `data.status == "healthy"`, nonempty string `mode`, and boolean `online`; it still returns `ready=False`. |
+| Friends | `data.friends[]`: `uid` is the stable peer identifier; optional string `nick` is the display name. Local ID is `friend:<uid>`. |
+| Groups | `data.groups[]`: `groupCode` is the stable peer identifier; optional string `groupName` is the display name. Local ID is `group:<groupCode>`. |
+| Recent contacts | `data.contacts[]`: `peerUid`, optional string `peerName`, and numeric non-boolean integer `chatType` of `1` (friend) or `2` (group). Request uses `includeAll: true`, and `limit` at most 100 within the remaining enumeration budget. |
+| Fetch request | `peer: {chatType: 1 or 2, peerUid: <stable ID>}`; `filter: {startTime: start_ms, endTime: end_ms - 1}`; `batchSize: 5000`, `page` starting at 1, `limit: 2000`, `forceRefresh: false`. |
+| Message record | `msgId` is a nonempty string or non-boolean integer normalized to string; `msgTime` is a non-boolean integer. Current normalization converts values below `100_000_000_000` from seconds to milliseconds and otherwise preserves milliseconds; this heuristic is not independent timestamp proof. Text concatenates `elements[].textElement.content` strings in order, ignoring non-text elements; malformed text elements reject that record. |
+| Pagination | `currentPage` must be a non-boolean integer equal to the requested page; `hasNext` must be boolean. `friends`, `groups`, or `messages` must be lists no larger than the requested limit. Missing/invalid page evidence stops with a typed error. |
+
+P0 limits are local guardrails for a narrow read, not upstream retention or
+coverage guarantees. Message fetch permits at most 20 pages and 20,000 raw
+entries per operation. Friend/group enumeration permits at most 10 pages per
+collection, with a shared 10,000-raw-entry budget across friends, groups, and
+recent contacts. Friends/groups request at most 2,000 entries per page. The
+adapter reserves a full next page before issuing it, keeping that collection's
+page size fixed so offsets do not shift; it can therefore stop below the raw
+entry ceiling. Exceeding a response limit or requiring another request beyond
+either budget raises `PaginationError`, with no partial-success `FetchPage`.
+These checks count records before parsing, filtering, or deduplication.
+
 **Range, cache, retention, and cancellation.** QCE may lazy-fetch more history
 than the final range and caches message data for ten minutes (at most 64
 entries, up to 20,000 messages each). Its cache/gap-repair and pagination
@@ -74,9 +98,12 @@ QCE may retain `security.json`, the copied runtime/link state, task outputs,
 resource directories, and partial ZIP/JSONL/HTML files. QCE task cancellation
 is cooperative and can leave started I/O; deleting a task is not a general
 export-file cleanup, and `original-files` cleanup applies only where that task
-has such a directory. The platform's local cancellation only prevents the next
-upstream request; it deliberately does not call QCE cancellation or any write
-endpoint. Setup must disclose these residues and give the user the tool's own,
+has such a directory. The platform's local cancellation prevents further
+upstream requests and checks again after a response and before returning a
+fetch result, raising `FetchCancelled` instead of delivering a successful page.
+It cannot interrupt an already issued synchronous HTTP request or undo tool
+side effects, and it does not call QCE cancellation or any write endpoint.
+Setup must disclose these residues and give the user the tool's own,
 version-verified cleanup steps; none are performed by this adapter.
 
 **Network/telemetry.** The reviewed project claims local read/parse and no
@@ -100,10 +127,10 @@ pagination uncertainty, range mismatch, or cancellation; retain only the
 explicitly disclosed local residue and never report a cancelled/partial read
 as a complete export.
 
-Fixed-source pointers: [tag tree](https://github.com/shuakami/qq-chat-exporter/tree/v6.2.10),
-[macOS guide](https://raw.githubusercontent.com/shuakami/qq-chat-exporter/v6.2.10/docs/macos-deploy.md),
-[server entry](https://raw.githubusercontent.com/shuakami/qq-chat-exporter/v6.2.10/qq-chat-export-server/src/main.rs),
-and [message routes](https://raw.githubusercontent.com/shuakami/qq-chat-exporter/v6.2.10/qq-chat-export-server/src/api/routes/messages.rs).
+Fixed-source pointers: [commit tree](https://github.com/shuakami/qq-chat-exporter/tree/cf8924d4790ddd857f5e26cca2b0163e4ec3b44f),
+[macOS guide](https://raw.githubusercontent.com/shuakami/qq-chat-exporter/cf8924d4790ddd857f5e26cca2b0163e4ec3b44f/docs/macos-deploy.md),
+[server entry](https://raw.githubusercontent.com/shuakami/qq-chat-exporter/cf8924d4790ddd857f5e26cca2b0163e4ec3b44f/qq-chat-export-server/src/main.rs),
+and [message routes](https://raw.githubusercontent.com/shuakami/qq-chat-exporter/cf8924d4790ddd857f5e26cca2b0163e4ec3b44f/qq-chat-export-server/src/api/routes/messages.rs).
 
 ## TraceMemo — blocked pending immutable supply-chain proof and consent
 
@@ -149,6 +176,14 @@ group-snapshot, scheduled-report, token-management, and AI paths. The tool's
 own token is a broad same-machine bearer capability, not a per-conversation or
 time-scoped permission model.
 
+| Surface | Exact fields and adapter interpretation |
+| --- | --- |
+| Health | Top-level `ok: true` and boolean `ready` are required; no secret is read and local readiness remains false. There is no QCE-style `success/data` envelope. |
+| Contact | Top-level `contacts[]`, each with `md5` matching exactly 32 hexadecimal characters, `type` exactly `user` or `group`, and optional string `m_nsNickName`. Normalize MD5 to lowercase without trimming; names are display-only. Only IDs from this adapter's fully successful latest enumeration may reach chatlog. |
+| Chatlog request | `talker` is that enumerated MD5; `startTime = floor(start_ms / 1000)` and `endTime = ceil(end_ms / 1000)`. No verified HTTP pagination, cursor, offset, or limit is available. |
+| Chatlog record | Top-level `messages[]`; `id` is a nonempty string or non-boolean integer normalized to string; `createTime` is Unix seconds as a non-boolean integer, multiplied by 1000. The current parser also accepts `datetime` only when `createTime` is absent; this compatibility fallback is not release verification. `content` is a string or absent/null. Invalid records are counted; usable in-range records remain in raw source order. |
+| Declared count | Optional top-level `count`, if present, must be a non-boolean nonnegative integer; null, booleans, negatives, strings, and floats raise body-free `UpstreamProtocolError`. Compare it with raw `len(messages)`, not accepted rows. A difference adds fixed warning `upstream_count_mismatch`. The exact upstream declaration is not persisted in the current evidence schema; `fetched_count` and slice `returned` remain actual observed list lengths. Neither a matching count nor a zero count proves complete history. |
+
 **Range/cache/cleanup/cancellation.** `chatlog` has no verified HTTP page,
 cursor, offset, or limit and may return all matching local history; `contact`
 also lacks a verified page/limit. The adapter over-reads whole Unix seconds
@@ -166,6 +201,14 @@ invalidates its access and unstarted work; it does not clear TraceMemo keys,
 caches, DB changes, system permission, or backups. Local cancellation stops
 new adapter work and makes no upstream cancellation/write call; an already
 issued response, cache write, DB monitor, or prior tool residue may remain.
+The adapter checks cancellation after receiving a response and before delivery;
+cancelled work raises `FetchCancelled` and does not deliver a successful page.
+P0 does not invent a server-side row limit or split unpaged TraceMemo responses
+to claim safety or completeness. The configured transport applies a response
+byte cap (default 1,048,576 bytes) and HTTP timeout (default 5 seconds per HTTPX
+timeout phase, not a total-operation deadline). An over-limit response fails
+without returning a successful page. The byte cap is a local response guard,
+not a promise to bound upstream work or all intermediate decoding allocations.
 
 **Network/telemetry and controls.** Remote AI Search/daily report/image
 features, Agent Hub, and experimental share-card infrastructure are separate
@@ -191,9 +234,48 @@ license/supply-chain proof, non-loopback service, client/account/version
 change, token/DB-not-ready error, non-disambiguated conversation, no-page
 response risk the user has not accepted, cancellation, or range mismatch.
 
-Immutable candidate pointers (not proof of the unresolved full SHA):
+Candidate release/tag pointers (movable references, not immutable source proof;
+the full SHA remains unresolved):
 [release](https://github.com/Wxw-Gu/TraceMemo/releases/tag/v2.3.0) and
 [tag tree](https://github.com/Wxw-Gu/TraceMemo/tree/v2.3.0).
+
+## Normalized messages and completeness evidence
+
+`SourceMessage` contains `message_id` (stable source ID or `None`),
+`conversation_id`, `sent_at_ms`, `text`, and `source_order`. `source_order` is
+the zero-based raw response position before filtering, parsing rejection, or
+deduplication; QCE continues the index across pages, and TraceMemo uses its
+single response. It is not a source sequence number or evidence of continuity.
+Distinct IDs at the same timestamp are preserved. Repeated usable IDs are
+deduplicated only after an occurrence is accepted, so an earlier out-of-range
+or malformed occurrence does not hide a later usable one.
+
+| Evidence | Meaning |
+| --- | --- |
+| `requested_start_ms`, `requested_end_ms` | The caller's increasing integer-millisecond half-open interval `[start,end)`. |
+| `observed_start_ms`, `observed_end_ms` | Minimum and maximum accepted timestamps, both inclusive; `None` for no accepted rows. These are observations, not verified range endpoints. |
+| `slices` | One entry per response. `page`/`cursor` are the values sent; `requested` is the requested row limit; `returned` counts all raw list entries; `accepted` counts retained rows from that response; `has_next` records upstream pagination evidence. Unavailable fields are `None`, including TraceMemo page/cursor/limit/has-next. |
+| `fetched_count`, `accepted_count` | Actual raw entries received across slices versus normalized rows retained after parsing, range filtering, and ID deduplication. They never substitute a declared upstream count. |
+| `duplicate_count` | Repeated usable IDs among all raw records, even when an occurrence is rejected. |
+| `unknown_time_count`, `missing_id_count`, `parse_error_count` | Rows with unusable timestamps, unusable IDs, or malformed record/text structure. Counters can overlap. Non-object rows increment parse errors; other counters need parsed fields. Unmeasured counters remain `None`, not manufactured zero. |
+| `warnings` / `reason` | Fixed warning codes and controlled explanatory text; no upstream body, token, key, or personal-data interpolation. Current warning codes include source-specific history uncertainty, `second_precision_boundaries`, `upstream_count_mismatch`, `duplicate_ids`, `unknown_timestamps`, `missing_identifiers`, and `malformed_records`. |
+| `termination` / `next_cursor` | QCE success records `upstream_exhausted`; TraceMemo records `no_upstream_pagination_or_completeness`. Both return `next_cursor=None` after adapter processing. This is no further adapter cursor, not proof that all source history was obtained. Budget, protocol, transport, and cancellation failures raise instead of returning successful evidence. |
+
+The status vocabulary has four distinct meanings:
+
+- `source_range_verified`: independent evidence establishes source coverage of
+  the requested range. Neither candidate adapter ever assigns this status on
+  its own, even with health success, empty responses, matching counts, or
+  exhausted pagination.
+- `partial`: the returned data has known coverage limitations. QCE always uses
+  this status because lazy history retrieval, cache, and gap repair leave
+  coverage unproven; zero accepted rows do not remove those limitations.
+- `unknown`: available evidence cannot determine source-range completeness.
+  TraceMemo always uses this status, including empty results and matching
+  declared counts, because no pagination/completeness signal is verified.
+- `empty`: an evidence producer explicitly reports no accepted messages. This
+  status alone does not establish that the source range is empty or verified.
+  Neither candidate uses it to override its `partial`/`unknown` limitations.
 
 ## Dukou — semi-automatic local-folder alternative, not an adapter fallback
 

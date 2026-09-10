@@ -24,7 +24,15 @@ _PROTOCOL_ERROR = "Source response did not match the locked contract."
 _PAGINATION_ERROR = "Source pagination could not be safely continued."
 _HISTORY_REASON = "QCE lazy fetch, cache, and gap repair do not prove complete history."
 _PAGE_LIMIT = 2000
-_MAX_PAGES = 10_000
+# P0 narrow-range guardrails count raw records before parsing/deduplication.
+# Exhaustion of either budget raises without returning a partial success.
+# Reserve the whole next page before requesting: changing a collection's limit
+# mid-pagination would change upstream offsets. This can stop below the ceiling.
+_MAX_MESSAGE_PAGES = 20
+_MAX_MESSAGE_ITEMS = 20_000
+_MAX_ENUMERATION_PAGES = 10
+_MAX_ENUMERATION_ITEMS = 10_000
+_BUDGET_ERROR = "Source reading exceeded the safe local budget."
 
 
 class _Transport(Protocol):
@@ -74,17 +82,25 @@ class QceAdapter:
 
     def list_conversations(self) -> list[ConversationRef]:
         result: list[ConversationRef] = []
+        remaining = _MAX_ENUMERATION_ITEMS
         for path, key, field, kind, label in (
             ("/api/friends", "friends", "uid", "friend", "nick"),
             ("/api/groups", "groups", "groupCode", "group", "groupName"),
         ):
-            for item in self._page(path, key):
+            values = self._page(path, key, remaining)
+            remaining -= len(values)
+            for item in values:
                 result.append(self._conversation(item, field, kind, label))
+        if remaining <= 0:
+            raise PaginationError(_BUDGET_ERROR)
+        recent_limit = min(100, remaining)
         contacts = self._get(
-            "/api/recent-contacts", {"limit": 100, "includeAll": True}
+            "/api/recent-contacts", {"limit": recent_limit, "includeAll": True}
         ).get("contacts")
         if not isinstance(contacts, list):
             raise UpstreamProtocolError(_PROTOCOL_ERROR)
+        if len(contacts) > recent_limit:
+            raise PaginationError(_BUDGET_ERROR)
         for item in contacts:
             if not isinstance(item, dict):
                 raise UpstreamProtocolError(_PROTOCOL_ERROR)
@@ -112,6 +128,9 @@ class QceAdapter:
         fetched = duplicates = unknown_time = missing_id = parse_errors = 0
         page = 1
         while True:
+            requested = _PAGE_LIMIT
+            if fetched + requested > _MAX_MESSAGE_ITEMS:
+                raise PaginationError(_BUDGET_ERROR)
             data = self._post(
                 "/api/messages/fetch",
                 {
@@ -119,11 +138,11 @@ class QceAdapter:
                     "filter": {"startTime": start_ms, "endTime": end_ms - 1},
                     "batchSize": 5000,
                     "page": page,
-                    "limit": _PAGE_LIMIT,
+                    "limit": requested,
                     "forceRefresh": False,
                 },
             )
-            raw, has_next = _page_values(data, "messages", page)
+            raw, has_next = _page_values(data, "messages", page, requested)
             accepted_before = len(messages)
             for item in raw:
                 order = fetched
@@ -156,7 +175,7 @@ class QceAdapter:
                 FetchSliceEvidence(
                     page=page,
                     cursor=None,
-                    requested=_PAGE_LIMIT,
+                    requested=requested,
                     returned=len(raw),
                     accepted=len(messages) - accepted_before,
                     has_next=has_next,
@@ -164,8 +183,8 @@ class QceAdapter:
             )
             if not has_next:
                 break
-            if page >= _MAX_PAGES:
-                raise PaginationError("Source pagination exceeded the safe limit.")
+            if page >= _MAX_MESSAGE_PAGES or fetched >= _MAX_MESSAGE_ITEMS:
+                raise PaginationError(_BUDGET_ERROR)
             page += 1
 
         warnings = ["qce_history_unproven"]
@@ -217,8 +236,14 @@ class QceAdapter:
             raise FetchCancelled("Source fetch cancelled locally.")
 
     def _headers(self) -> dict[str, str]:
-        token = self._store.get(access=self._access, consent=self._consent)
-        return {"Authorization": "Bearer " + token}
+        self._check_cancelled()
+        try:
+            token = self._store.get(access=self._access, consent=self._consent)
+            headers = {"Authorization": "Bearer " + token}
+        except Exception:
+            raise SourceAdapterError("Source request failed.") from None
+        self._check_cancelled()
+        return headers
 
     def _call(self, request: Callable[[], object]) -> dict[str, Any]:
         self._check_cancelled()
@@ -231,35 +256,42 @@ class QceAdapter:
         return _data(response)
 
     def _get(self, path: str, params: Mapping[str, object]) -> dict[str, Any]:
+        headers = self._headers()
         return self._call(
             lambda: self._transport.request(
-                "GET", path, headers=self._headers(), params=params
+                "GET", path, headers=headers, params=params
             )
         )
 
     def _post(self, path: str, body: object) -> dict[str, Any]:
+        headers = self._headers()
         return self._call(
             lambda: self._transport.request(
-                "POST", path, headers=self._headers(), json=body
+                "POST", path, headers=headers, json=body
             )
         )
 
-    def _page(self, path: str, key: str) -> list[dict[str, Any]]:
+    def _page(
+        self, path: str, key: str, remaining: int
+    ) -> list[dict[str, Any]]:
         page = 1
+        requested = min(_PAGE_LIMIT, remaining)
         result: list[dict[str, Any]] = []
         while True:
+            if requested <= 0 or len(result) + requested > remaining:
+                raise PaginationError(_BUDGET_ERROR)
             data = self._get(
-                path, {"page": page, "limit": _PAGE_LIMIT, "forceRefresh": False}
+                path, {"page": page, "limit": requested, "forceRefresh": False}
             )
-            values, has_next = _page_values(data, key, page)
+            values, has_next = _page_values(data, key, page, requested)
             for value in values:
                 if not isinstance(value, dict):
                     raise UpstreamProtocolError(_PROTOCOL_ERROR)
                 result.append(value)
             if not has_next:
                 return result
-            if page >= _MAX_PAGES:
-                raise PaginationError("Source pagination exceeded the safe limit.")
+            if page >= _MAX_ENUMERATION_PAGES or len(result) >= remaining:
+                raise PaginationError(_BUDGET_ERROR)
             page += 1
 
     def _conversation(
@@ -304,7 +336,7 @@ def _timestamp(value: object) -> int | None:
 
 
 def _page_values(
-    data: Mapping[str, Any], key: str, page: int
+    data: Mapping[str, Any], key: str, page: int, requested: int
 ) -> tuple[list[Any], bool]:
     current = data.get("currentPage")
     has_next = data.get("hasNext")
@@ -313,6 +345,8 @@ def _page_values(
     values = data.get(key)
     if not isinstance(values, list):
         raise UpstreamProtocolError(_PROTOCOL_ERROR)
+    if len(values) > requested:
+        raise PaginationError(_BUDGET_ERROR)
     return values, has_next
 
 
