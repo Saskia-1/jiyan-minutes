@@ -10,6 +10,8 @@
 
 **Spec:** `chat_to_howto_codex_prompt_v3.md`
 
+**Normative acceptance supplement:** `docs/superpowers/plans/2026-09-10-v3-traceability-amendments.md`
+
 ## Global Constraints
 
 - Selection order is source/account → conversation(s) → `[start,end)` → approved export root → export.
@@ -94,4 +96,3 @@
 - [ ] Implement the accessible responsive flow and preserve batch/snapshot identity in route state without storing secrets.
 - [ ] Add an E2E synthetic source scenario proving one click performs fetch → artifacts → import → searchable result with no second upload.
 - [ ] Run frontend unit and E2E tests.
-

@@ -10,6 +10,8 @@
 
 **Spec:** `chat_to_howto_codex_prompt_v3.md`
 
+**Normative acceptance supplement:** `docs/superpowers/plans/2026-09-10-v3-traceability-amendments.md`
+
 ## Global Constraints
 
 - Provider defaults to `unconfigured`; discovering a key never authorizes using it.
@@ -80,4 +82,3 @@
 - [ ] Run focused backend/frontend tests and confirm failures.
 - [ ] Implement durable orchestration, accounting, cache invalidation, and UI; evidence drill-down reads local snapshot only and makes zero provider calls.
 - [ ] Re-run tests and E2E synthetic generation flow.
-

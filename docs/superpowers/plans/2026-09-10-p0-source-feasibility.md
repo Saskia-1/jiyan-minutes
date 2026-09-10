@@ -10,6 +10,8 @@
 
 **Spec:** `chat_to_howto_codex_prompt_v3.md`
 
+**Normative acceptance supplement:** `docs/superpowers/plans/2026-09-10-v3-traceability-amendments.md`
+
 ## Global Constraints
 
 - Target macOS ARM64 and listen only on `127.0.0.1`.
@@ -120,4 +122,3 @@
 - [ ] **Step 4: Fill the five documents with observed evidence**, keeping each platform `documented_not_tested`, `needs_user_action`, or `blocked` until an actual user-approved export runs.
 - [ ] **Step 5: Present one concrete confirmation card per upstream tool before any install/initialization**, then run the real verifier only after the user approves and makes the local selection.
 - [ ] **Step 6: Record actual P0 results without chat content**; never promote mock results or port health to `ready`.
-
