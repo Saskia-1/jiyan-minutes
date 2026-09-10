@@ -6,6 +6,8 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from chat_to_howto.domain.consent import ConsentRecord, ConsentScope
+
 
 class SourceStatus(str, Enum):
     UNCONFIGURED = "unconfigured"
@@ -70,8 +72,28 @@ class SourceCapability(BaseModel):
             update={"status": status, "verified_fingerprint": None, "blocked_reason": None}
         )
 
-    def record_verification(self, fingerprint: SourceFingerprint) -> "SourceCapability":
+    def record_verification(
+        self,
+        fingerprint: SourceFingerprint,
+        *,
+        current_fingerprint: SourceFingerprint,
+        export_scope: ConsentScope,
+        export_consent: ConsentRecord,
+    ) -> "SourceCapability":
         """Only a successful, versioned verification can make a source ready."""
+        if self.status in {SourceStatus.BLOCKED, SourceStatus.UNSUPPORTED}:
+            raise ValueError("blocked or unsupported source cannot be verified")
+        if fingerprint != current_fingerprint:
+            raise ValueError("verification fingerprint must match the current fingerprint")
+        if (
+            export_scope.operation != "export_verification"
+            or export_scope.source_id != self.source_id
+            or export_scope.client_version != fingerprint.client_version
+            or export_scope.tool_version != fingerprint.tool_version
+            or export_scope.account_version != fingerprint.account_version
+            or not export_consent.matches(export_scope)
+        ):
+            raise ValueError("ready status requires approved export consent")
         return self.model_copy(
             update={
                 "status": SourceStatus.READY,

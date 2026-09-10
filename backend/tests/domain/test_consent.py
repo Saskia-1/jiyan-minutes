@@ -4,11 +4,20 @@ from __future__ import annotations
 
 import sys
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-from chat_to_howto.domain.consent import ConsentRecord, ConsentScope
+from chat_to_howto.domain.consent import (
+    ConsentRecord,
+    ConsentScope,
+    SecretAccessScope,
+    SecretOperation,
+)
+
+
+NOW = datetime.now(timezone.utc)
 
 
 class ConsentTests(unittest.TestCase):
@@ -24,7 +33,7 @@ class ConsentTests(unittest.TestCase):
             operation="verification",
         )
         changed_scope = scope.model_copy(update={"conversation_id": "conversation-2"})
-        record = ConsentRecord.grant(scope)
+        record = ConsentRecord.grant(scope, expires_at=NOW + timedelta(minutes=5), now=NOW)
 
         self.assertTrue(record.matches(scope))
         self.assertFalse(record.matches(changed_scope))
@@ -42,4 +51,50 @@ class ConsentTests(unittest.TestCase):
             operation="verification",
         )
 
-        self.assertFalse(ConsentRecord.decline(scope).matches(scope))
+        self.assertFalse(
+            ConsentRecord.decline(scope, expires_at=NOW + timedelta(minutes=5), now=NOW).matches(
+                scope, now=NOW
+            )
+        )
+
+    def test_secret_access_scope_requires_the_same_operation_reference_and_versions(self) -> None:
+        """Changing secret operation or version must require a fresh consent."""
+        scope = SecretAccessScope(
+            operation=SecretOperation.SET,
+            secret_reference="qq-token",
+            secret_backend="keychain",
+            source_id="qq",
+            account_id="account-1",
+            client_version="9.9.0",
+            tool_version="1.2.3",
+            account_version="account-v1",
+        )
+        record = ConsentRecord.grant(scope, expires_at=NOW + timedelta(minutes=5), now=NOW)
+
+        self.assertTrue(record.matches(scope, now=NOW))
+        self.assertFalse(
+            record.matches(scope.model_copy(update={"operation": SecretOperation.GET}), now=NOW)
+        )
+        self.assertFalse(
+            record.matches(scope.model_copy(update={"tool_version": "1.2.4"}), now=NOW)
+        )
+
+    def test_expired_secret_access_consent_never_matches(self) -> None:
+        """Expired approval must not be reusable for a later secret operation."""
+        scope = SecretAccessScope(
+            operation=SecretOperation.GET,
+            secret_reference="qq-token",
+            secret_backend="memory",
+            source_id="qq",
+            account_id="account-1",
+            client_version="9.9.0",
+            tool_version="1.2.3",
+            account_version="account-v1",
+        )
+        record = ConsentRecord.grant(
+            scope,
+            expires_at=NOW - timedelta(minutes=1),
+            now=NOW - timedelta(minutes=2),
+        )
+
+        self.assertFalse(record.matches(scope, now=NOW))
