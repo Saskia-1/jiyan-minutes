@@ -1,0 +1,36 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Local application data and database files
+data/
+exports/
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# Generated documents and runtime state
+generated/
+documents/generated/
+*.docx
+*.pdf
+*.tmp
+
+# Caches and third-party state
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+backend/.venv/
+frontend/node_modules/
+frontend/dist/
+third_party_state/
+
