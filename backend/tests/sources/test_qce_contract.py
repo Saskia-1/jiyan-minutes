@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from dataclasses import FrozenInstanceError
 import sys
 import unittest
 from pathlib import Path
@@ -11,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from chat_to_howto.domain.consent import ConsentRecord, SecretAccessScope, SecretOperation
 from chat_to_howto.security.secrets import InMemorySecretStore
-from chat_to_howto.sources.base import FetchCancelled, PaginationError, SourceAdapterError
+from chat_to_howto.sources.base import FetchCancelled, PaginationError, SourceAdapterError, UpstreamProtocolError
 from chat_to_howto.sources.qce import QceAdapter
 
 
@@ -66,6 +67,178 @@ def adapter(responses: list[dict[str, object]]) -> tuple[QceAdapter, RecordingTr
 
 
 class QceContractTests(unittest.TestCase):
+    def test_rejected_id_occurrence_cannot_hide_later_usable_record(self) -> None:
+        source, _ = adapter([
+            {"success": True, "data": {"currentPage": 1, "hasNext": True, "messages": [
+                {"msgId": "a", "msgTime": None},
+                {"msgId": "b", "msgTime": 1_700_000_002_000},
+            ]}},
+            {"success": True, "data": {"currentPage": 2, "hasNext": False, "messages": [
+                {"msgId": "a", "msgTime": 1_700_000_000_000},
+                {"msgId": "b", "msgTime": 1_700_000_000_100},
+                {"msgId": "b", "msgTime": 1_700_000_000_100},
+            ]}},
+        ])
+        page = source.fetch_range("friend:peer", 1_700_000_000_000, 1_700_000_001_000)
+        self.assertEqual([item.message_id for item in page.messages], ["a", "b"])
+        self.assertEqual(page.completeness.duplicate_count, 3)
+        self.assertEqual(page.completeness.fetched_count, 5)
+        self.assertEqual(page.completeness.accepted_count, 2)
+
+    def test_dependency_errors_are_body_free_even_when_already_typed(self) -> None:
+        for operation in ("health", "list_conversations", "fetch_range"):
+            for error_type in (RuntimeError, SourceAdapterError, UpstreamProtocolError):
+                with self.subTest(operation=operation, error_type=error_type):
+                    source, _ = adapter([error_type("synthetic-private-sentinel")])
+                    with self.assertRaises(SourceAdapterError) as caught:
+                        if operation == "fetch_range":
+                            source.fetch_range("friend:peer", 0, 10)
+                        else:
+                            getattr(source, operation)()
+                    error = caught.exception
+                    self.assertIs(type(error), SourceAdapterError)
+                    self.assertNotIn("synthetic-private-sentinel", str(error))
+                    self.assertNotIn("synthetic-private-sentinel", repr(error))
+                    self.assertIsNone(error.__cause__)
+                    self.assertTrue(error.__suppress_context__)
+
+    def test_secret_store_errors_are_sanitized_before_transport(self) -> None:
+        for operation in ("list_conversations", "fetch_range"):
+            with self.subTest(operation=operation):
+                source, transport = adapter([])
+                def denied(**_kwargs):
+                    raise SourceAdapterError("synthetic-private-secret")
+                source._store.get = denied
+                with self.assertRaises(SourceAdapterError) as caught:
+                    if operation == "fetch_range":
+                        source.fetch_range("friend:peer", 0, 10)
+                    else:
+                        source.list_conversations()
+                self.assertIs(type(caught.exception), SourceAdapterError)
+                self.assertNotIn("synthetic-private-secret", repr(caught.exception))
+                self.assertIsNone(caught.exception.__cause__)
+                self.assertTrue(caught.exception.__suppress_context__)
+                self.assertEqual(transport.calls, [])
+
+    def test_health_and_each_enumeration_response_observe_cancellation(self) -> None:
+        responses = [
+            {"success": True, "data": {"friends": [], "currentPage": 1, "hasNext": False}},
+            {"success": True, "data": {"groups": [], "currentPage": 1, "hasNext": False}},
+            {"success": True, "data": {"contacts": []}},
+        ]
+        for cancel_at in range(3):
+            with self.subTest(cancel_at=cancel_at):
+                source, transport = adapter(responses)
+                original = transport.request
+                def request(*args, **kwargs):
+                    response = original(*args, **kwargs)
+                    if len(transport.calls) == cancel_at + 1:
+                        source.cancel()
+                    return response
+                transport.request = request
+                with self.assertRaises(FetchCancelled):
+                    source.list_conversations()
+                self.assertEqual(len(transport.calls), cancel_at + 1)
+        source, transport = adapter([])
+        def health_response(*args, **kwargs):
+            source.cancel()
+            return {"success": True, "data": {"status": "healthy", "mode": "full", "online": True}}
+        transport.request = health_response
+        with self.assertRaises(FetchCancelled):
+            source.health()
+
+    def test_enumeration_rejects_invalid_ids_types_and_pages(self) -> None:
+        friend_page = {"friends": [], "currentPage": 1, "hasNext": False}
+        group_page = {"groups": [], "currentPage": 1, "hasNext": False}
+        for invalid in (True, False, 1.0, "1", None):
+            with self.subTest(page=invalid):
+                source, _ = adapter([{"success": True, "data": {**friend_page, "currentPage": invalid}}])
+                with self.assertRaises(PaginationError):
+                    source.list_conversations()
+        for item in ({"uid": True}, {"uid": ""}, None):
+            with self.subTest(friend=item):
+                source, _ = adapter([{"success": True, "data": {**friend_page, "friends": [item]}}])
+                with self.assertRaises(UpstreamProtocolError):
+                    source.list_conversations()
+        for item in ({"peerUid": True, "chatType": 1}, {"peerUid": "p", "chatType": True}, {"peerUid": "p", "chatType": 3}, {"peerUid": "p", "chatType": 1.0}, {"peerUid": "p"}, None):
+            with self.subTest(recent=item):
+                source, _ = adapter([{"success": True, "data": friend_page}, {"success": True, "data": group_page}, {"success": True, "data": {"contacts": [item]}}])
+                with self.assertRaises(UpstreamProtocolError):
+                    source.list_conversations()
+
+    def test_evidence_accounts_for_range_slices_and_every_rejected_record(self) -> None:
+        source, _ = adapter([
+            {"success": True, "data": {"currentPage": 1, "hasNext": True, "messages": [
+                {"msgId": "a", "msgTime": 1_700_000_000, "elements": []},
+                {"msgId": "outside", "msgTime": 1_700_000_002_000, "elements": []},
+                {"msgId": "unknown", "msgTime": True, "elements": []},
+                "malformed",
+            ]}},
+            {"success": True, "data": {"currentPage": 2, "hasNext": False, "messages": [
+                {"msgId": "a", "msgTime": 1_700_000_000_000, "elements": []},
+                {"msgId": True, "msgTime": 1_700_000_000_500, "elements": []},
+                {"msgId": "broken", "msgTime": 1_700_000_000_600, "elements": "bad"},
+            ]}},
+        ])
+        page = source.fetch_range("friend:peer", 1_700_000_000_000, 1_700_000_001_000)
+        self.assertEqual([item.message_id for item in page.messages], ["a", None])
+        evidence = page.completeness
+        self.assertEqual(evidence.status, "partial")
+        self.assertEqual(evidence.requested_start_ms, 1_700_000_000_000)
+        self.assertEqual(evidence.requested_end_ms, 1_700_000_001_000)
+        self.assertEqual(evidence.observed_start_ms, 1_700_000_000_000)
+        self.assertEqual(evidence.observed_end_ms, 1_700_000_000_500)
+        self.assertEqual((evidence.fetched_count, evidence.accepted_count, evidence.duplicate_count), (7, 2, 1))
+        self.assertEqual((evidence.unknown_time_count, evidence.missing_id_count, evidence.parse_error_count), (1, 1, 2))
+        self.assertEqual(evidence.termination, "upstream_exhausted")
+        self.assertEqual(evidence.warnings, ("qce_history_unproven", "duplicate_ids", "unknown_timestamps", "missing_identifiers", "malformed_records"))
+        self.assertEqual([(item.page, item.cursor, item.requested, item.returned, item.accepted, item.has_next) for item in evidence.slices], [(1, None, 2000, 4, 1, True), (2, None, 2000, 3, 1, False)])
+        with self.assertRaises(FrozenInstanceError):
+            evidence.accepted_count = 99
+        with self.assertRaises(FrozenInstanceError):
+            evidence.slices[0].accepted = 99
+
+    def test_empty_and_unknown_time_only_pages_never_claim_complete(self) -> None:
+        for raw, unknown_count in (([], 0), ([{"msgId": "a", "msgTime": False}], 1)):
+            with self.subTest(raw=raw):
+                source, _ = adapter([{"success": True, "data": {"currentPage": 1, "hasNext": False, "messages": raw}}])
+                evidence = source.fetch_range("friend:peer", 0, 10).completeness
+                self.assertEqual(evidence.status, "partial")
+                self.assertIsNone(evidence.observed_start_ms)
+                self.assertIsNone(evidence.observed_end_ms)
+                self.assertEqual(evidence.fetched_count, len(raw))
+                self.assertEqual(evidence.accepted_count, 0)
+                self.assertEqual(evidence.unknown_time_count, unknown_count)
+
+    def test_response_time_cancel_never_returns_a_partial_page(self) -> None:
+        """Cancellation racing with a response must win before normalized data escapes."""
+        source, transport = adapter([])
+        def response_after_cancel(*_args, **_kwargs):
+            source.cancel()
+            return {"success": True, "data": {"messages": [], "hasNext": False, "currentPage": 1}}
+        transport.request = response_after_cancel
+        with self.assertRaises(FetchCancelled):
+            source.fetch_range("friend:peer", 0, 1)
+    def test_enumerates_friend_and_group_pages_without_skipping_second_page(self) -> None:
+        """Both QCE collections are paged; one page is not a complete enumeration."""
+        source, transport = adapter([
+            {"success": True, "data": {"friends": [{"uid": "f1"}], "currentPage": 1, "hasNext": True}},
+            {"success": True, "data": {"friends": [{"uid": "f2"}], "currentPage": 2, "hasNext": False}},
+            {"success": True, "data": {"groups": [{"groupCode": "g1"}], "currentPage": 1, "hasNext": True}},
+            {"success": True, "data": {"groups": [{"groupCode": "g2"}], "currentPage": 2, "hasNext": False}},
+            {"success": True, "data": {"contacts": []}},
+        ])
+        self.assertEqual([item.conversation_id for item in source.list_conversations()], ["friend:f1", "friend:f2", "group:g1", "group:g2"])
+        self.assertEqual([call[3]["page"] for call in transport.calls[:4]], [1, 2, 1, 2])
+    def test_cross_page_stable_ids_dedupe_but_same_text_and_time_different_ids_survive(self) -> None:
+        """A page overlap must not erase distinct messages sharing text/timestamp."""
+        source, _ = adapter([
+            {"success": True, "data": {"messages": [{"msgId": "a", "msgTime": 1_700_000_000_000, "elements": []}, {"msgId": "b", "msgTime": 1_700_000_000_000, "elements": []}], "hasNext": True, "currentPage": 1}},
+            {"success": True, "data": {"messages": [{"msgId": "a", "msgTime": 1_700_000_000_000, "elements": []}, {"msgId": "c", "msgTime": 1_700_000_000_000, "elements": []}], "hasNext": False, "currentPage": 2}},
+        ])
+        page = source.fetch_range("friend:peer", 1_700_000_000_000, 1_700_000_001_000)
+        self.assertEqual([item.message_id for item in page.messages], ["a", "b", "c"])
+        self.assertEqual(page.completeness.duplicate_count, 1)
     def test_uses_only_locked_read_endpoints_and_exact_request_shapes(self) -> None:
         """Changing method, token placement, or range units would violate QCE v6.2.10."""
         source, transport = adapter(

@@ -1,86 +1,346 @@
 """Locked QCE v6.2.10 read-only adapter."""
+
 from __future__ import annotations
-from collections.abc import Mapping
-from typing import Any, Protocol
+
+from collections.abc import Callable, Mapping
+from typing import Any, Protocol, TypeGuard
+
 from chat_to_howto.domain.consent import ConsentRecord, SecretAccessScope
 from chat_to_howto.security.secrets import SecretStore
-from chat_to_howto.sources.base import CompletenessEvidence, ConversationRef, FetchCancelled, FetchPage, PaginationError, SourceAdapterError, SourceHealth, SourceMessage, UpstreamProtocolError
+from chat_to_howto.sources.base import (
+    CompletenessEvidence,
+    ConversationRef,
+    FetchCancelled,
+    FetchPage,
+    FetchSliceEvidence,
+    PaginationError,
+    SourceAdapterError,
+    SourceHealth,
+    SourceMessage,
+    UpstreamProtocolError,
+)
+
+_PROTOCOL_ERROR = "Source response did not match the locked contract."
+_PAGINATION_ERROR = "Source pagination could not be safely continued."
+_HISTORY_REASON = "QCE lazy fetch, cache, and gap repair do not prove complete history."
+_PAGE_LIMIT = 2000
+_MAX_PAGES = 10_000
+
 
 class _Transport(Protocol):
-    def request(self, method: str, path: str, *, headers: dict[str, str], params: Mapping[str, object] | None = None, json: object | None = None) -> dict[str, Any]: ...
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: dict[str, str],
+        params: Mapping[str, object] | None = None,
+        json: object | None = None,
+    ) -> dict[str, Any]: ...
+
 
 class QceAdapter:
-    def __init__(self, *, transport: _Transport, secret_store: SecretStore, token_access: SecretAccessScope, token_consent: ConsentRecord, account_id: str) -> None:
-        self._transport, self._store, self._access, self._consent, self._account, self._cancelled = transport, secret_store, token_access, token_consent, account_id, False
+    def __init__(
+        self,
+        *,
+        transport: _Transport,
+        secret_store: SecretStore,
+        token_access: SecretAccessScope,
+        token_consent: ConsentRecord,
+        account_id: str,
+    ) -> None:
+        self._transport = transport
+        self._store = secret_store
+        self._access = token_access
+        self._consent = token_consent
+        self._account = account_id
+        self._cancelled = False
+
     def health(self) -> SourceHealth:
-        data = _data(self._transport.request("GET", "/health", headers={}))
-        if data.get("status") != "healthy" or not isinstance(data.get("mode"), str) or not isinstance(data.get("online"), bool): raise UpstreamProtocolError("Source response did not match the locked contract.")
-        return SourceHealth(True, False)
-    def list_accounts(self) -> tuple[str, ...]: return (self._account,)
+        data = self._call(
+            lambda: self._transport.request("GET", "/health", headers={})
+        )
+        if (
+            data.get("status") != "healthy"
+            or not isinstance(data.get("mode"), str)
+            or not data["mode"]
+            or not isinstance(data.get("online"), bool)
+        ):
+            raise UpstreamProtocolError(_PROTOCOL_ERROR)
+        return SourceHealth(available=True, ready=False)
+
+    def list_accounts(self) -> tuple[str, ...]:
+        return (self._account,)
+
     def list_conversations(self) -> list[ConversationRef]:
         result: list[ConversationRef] = []
-        for path, key, field, kind, label in (("/api/friends", "friends", "uid", "friend", "nick"), ("/api/groups", "groups", "groupCode", "group", "groupName")):
+        for path, key, field, kind, label in (
+            ("/api/friends", "friends", "uid", "friend", "nick"),
+            ("/api/groups", "groups", "groupCode", "group", "groupName"),
+        ):
             for item in self._page(path, key):
-                if isinstance(item.get(field), (str, int)):
-                    value = str(item[field]); result.append(ConversationRef("qq", self._account, f"{kind}:{value}", str(item.get(label) or value), kind))
-        contacts = self._get("/api/recent-contacts", {"limit": 100, "includeAll": True}).get("contacts")
-        if isinstance(contacts, list):
-            for item in contacts:
-                if isinstance(item, dict) and isinstance(item.get("peerUid"), (str, int)):
-                    kind = "group" if item.get("chatType") == 2 else "friend"; value = str(item["peerUid"])
-                    result.append(ConversationRef("qq", self._account, f"{kind}:{value}", str(item.get("peerName") or value), kind))
-        seen: set[str] = set(); return [item for item in result if not (item.conversation_id in seen or seen.add(item.conversation_id))]
-    def fetch_range(self, conversation_id: str, start_ms: int, end_ms: int) -> FetchPage:
-        if any(not isinstance(x, int) or isinstance(x, bool) for x in (start_ms, end_ms)) or end_ms <= start_ms: raise ValueError("range must use increasing integer milliseconds")
-        if self._cancelled: raise FetchCancelled("Source fetch cancelled locally.")
-        peer_type, peer_uid = _peer(conversation_id); messages: list[SourceMessage] = []; page = 1; seen: set[int] = set(); reason = "QCE lazy fetch, cache, and gap repair do not prove complete history."
-        while True:
-            if self._cancelled: raise FetchCancelled("Source fetch cancelled locally.")
-            data = self._post("/api/messages/fetch", {"peer": {"chatType": peer_type, "peerUid": peer_uid}, "filter": {"startTime": start_ms, "endTime": end_ms - 1}, "batchSize": 5000, "page": page, "limit": 2000, "forceRefresh": False})
-            current, raw, has_next = data.get("currentPage"), data.get("messages"), data.get("hasNext")
-            if isinstance(current, bool) or not isinstance(current, int) or current != page or current in seen or not isinstance(has_next, bool): raise PaginationError("Source pagination could not be safely continued.")
-            if not isinstance(raw, list): raise UpstreamProtocolError("Source response did not match the locked contract.")
-            seen.add(current)
-            for item in raw:
-                if isinstance(item, dict):
-                    msg = _message(item, conversation_id, len(messages))
-                    if msg.sent_at_ms is None:
-                        reason = "At least one QCE message lacked a usable timestamp."
-                    else:
-                        if msg.message_id is None:
-                            reason = "At least one QCE message lacked a stable identifier."
-                        if start_ms <= msg.sent_at_ms < end_ms:
-                            messages.append(msg)
-            if not has_next: break
-            if page >= 10000: raise PaginationError("Source pagination exceeded the safe limit.")
-            page += 1
-        return FetchPage(tuple(messages), None, CompletenessEvidence("partial", reason))
-    def cancel(self) -> None: self._cancelled = True
-    def _headers(self) -> dict[str, str]: return {"Authorization": "Bearer " + self._store.get(access=self._access, consent=self._consent)}
-    def _get(self, path: str, params: Mapping[str, object]) -> dict[str, Any]: return _call(lambda: self._transport.request("GET", path, headers=self._headers(), params=params))
-    def _post(self, path: str, body: object) -> dict[str, Any]: return _call(lambda: self._transport.request("POST", path, headers=self._headers(), json=body))
-    def _page(self, path: str, key: str) -> list[dict[str, Any]]:
-        data = self._get(path, {"page": 1, "limit": 2000, "forceRefresh": False}); values = data.get(key)
-        if not isinstance(values, list) or data.get("hasNext") is not False: raise UpstreamProtocolError("Source response did not match the locked contract.")
-        return [value for value in values if isinstance(value, dict)]
+                result.append(self._conversation(item, field, kind, label))
+        contacts = self._get(
+            "/api/recent-contacts", {"limit": 100, "includeAll": True}
+        ).get("contacts")
+        if not isinstance(contacts, list):
+            raise UpstreamProtocolError(_PROTOCOL_ERROR)
+        for item in contacts:
+            if not isinstance(item, dict):
+                raise UpstreamProtocolError(_PROTOCOL_ERROR)
+            chat_type = item.get("chatType")
+            if not _integer(chat_type) or chat_type not in (1, 2):
+                raise UpstreamProtocolError(_PROTOCOL_ERROR)
+            kind = "group" if chat_type == 2 else "friend"
+            result.append(self._conversation(item, "peerUid", kind, "peerName"))
+        unique: dict[str, ConversationRef] = {}
+        for conversation in result:
+            unique.setdefault(conversation.conversation_id, conversation)
+        self._check_cancelled()
+        return list(unique.values())
 
-def _call(call: Any) -> dict[str, Any]:
-    try: return _data(call())
-    except SourceAdapterError: raise
-    except Exception: raise SourceAdapterError("Source request failed.") from None
-def _data(response: Mapping[str, Any]) -> dict[str, Any]:
+    def fetch_range(
+        self, conversation_id: str, start_ms: int, end_ms: int
+    ) -> FetchPage:
+        if not _integer(start_ms) or not _integer(end_ms) or end_ms <= start_ms:
+            raise ValueError("range must use increasing integer milliseconds")
+        peer_type, peer_uid = _peer(conversation_id)
+        messages: list[SourceMessage] = []
+        slices: list[FetchSliceEvidence] = []
+        message_ids: set[str] = set()
+        accepted_ids: set[str] = set()
+        fetched = duplicates = unknown_time = missing_id = parse_errors = 0
+        page = 1
+        while True:
+            data = self._post(
+                "/api/messages/fetch",
+                {
+                    "peer": {"chatType": peer_type, "peerUid": peer_uid},
+                    "filter": {"startTime": start_ms, "endTime": end_ms - 1},
+                    "batchSize": 5000,
+                    "page": page,
+                    "limit": _PAGE_LIMIT,
+                    "forceRefresh": False,
+                },
+            )
+            raw, has_next = _page_values(data, "messages", page)
+            accepted_before = len(messages)
+            for item in raw:
+                order = fetched
+                fetched += 1
+                if not isinstance(item, dict):
+                    parse_errors += 1
+                    continue
+                identifier = _identifier(item.get("msgId"))
+                stamp = _timestamp(item.get("msgTime"))
+                missing_id += identifier is None
+                unknown_time += stamp is None
+                if identifier is not None:
+                    if identifier in message_ids:
+                        duplicates += 1
+                    message_ids.add(identifier)
+                try:
+                    text = _message_text(item)
+                except UpstreamProtocolError:
+                    parse_errors += 1
+                    continue
+                if identifier is not None and identifier in accepted_ids:
+                    continue
+                if stamp is not None and start_ms <= stamp < end_ms:
+                    if identifier is not None:
+                        accepted_ids.add(identifier)
+                    messages.append(
+                        SourceMessage(identifier, conversation_id, stamp, text, order)
+                    )
+            slices.append(
+                FetchSliceEvidence(
+                    page=page,
+                    cursor=None,
+                    requested=_PAGE_LIMIT,
+                    returned=len(raw),
+                    accepted=len(messages) - accepted_before,
+                    has_next=has_next,
+                )
+            )
+            if not has_next:
+                break
+            if page >= _MAX_PAGES:
+                raise PaginationError("Source pagination exceeded the safe limit.")
+            page += 1
+
+        warnings = ["qce_history_unproven"]
+        for count, warning in (
+            (duplicates, "duplicate_ids"),
+            (unknown_time, "unknown_timestamps"),
+            (missing_id, "missing_identifiers"),
+            (parse_errors, "malformed_records"),
+        ):
+            if count:
+                warnings.append(warning)
+        reason = _HISTORY_REASON
+        if missing_id:
+            reason += " At least one QCE message lacked a stable identifier."
+        if unknown_time:
+            reason += " At least one QCE message lacked a usable timestamp."
+        if parse_errors:
+            reason += " At least one QCE message could not be parsed."
+        stamps = [
+            message.sent_at_ms
+            for message in messages
+            if message.sent_at_ms is not None
+        ]
+        evidence = CompletenessEvidence(
+            status="partial",
+            reason=reason,
+            requested_start_ms=start_ms,
+            requested_end_ms=end_ms,
+            observed_start_ms=min(stamps, default=None),
+            observed_end_ms=max(stamps, default=None),
+            slices=tuple(slices),
+            fetched_count=fetched,
+            accepted_count=len(messages),
+            duplicate_count=duplicates,
+            unknown_time_count=unknown_time,
+            missing_id_count=missing_id,
+            parse_error_count=parse_errors,
+            warnings=tuple(warnings),
+            termination="upstream_exhausted",
+        )
+        self._check_cancelled()
+        return FetchPage(tuple(messages), None, evidence)
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def _check_cancelled(self) -> None:
+        if self._cancelled:
+            raise FetchCancelled("Source fetch cancelled locally.")
+
+    def _headers(self) -> dict[str, str]:
+        token = self._store.get(access=self._access, consent=self._consent)
+        return {"Authorization": "Bearer " + token}
+
+    def _call(self, request: Callable[[], object]) -> dict[str, Any]:
+        self._check_cancelled()
+        try:
+            response = request()
+        except Exception:
+            # Dependency errors, including already-typed errors, are untrusted.
+            raise SourceAdapterError("Source request failed.") from None
+        self._check_cancelled()
+        return _data(response)
+
+    def _get(self, path: str, params: Mapping[str, object]) -> dict[str, Any]:
+        return self._call(
+            lambda: self._transport.request(
+                "GET", path, headers=self._headers(), params=params
+            )
+        )
+
+    def _post(self, path: str, body: object) -> dict[str, Any]:
+        return self._call(
+            lambda: self._transport.request(
+                "POST", path, headers=self._headers(), json=body
+            )
+        )
+
+    def _page(self, path: str, key: str) -> list[dict[str, Any]]:
+        page = 1
+        result: list[dict[str, Any]] = []
+        while True:
+            data = self._get(
+                path, {"page": page, "limit": _PAGE_LIMIT, "forceRefresh": False}
+            )
+            values, has_next = _page_values(data, key, page)
+            for value in values:
+                if not isinstance(value, dict):
+                    raise UpstreamProtocolError(_PROTOCOL_ERROR)
+                result.append(value)
+            if not has_next:
+                return result
+            if page >= _MAX_PAGES:
+                raise PaginationError("Source pagination exceeded the safe limit.")
+            page += 1
+
+    def _conversation(
+        self, item: Mapping[str, Any], field: str, kind: str, label: str
+    ) -> ConversationRef:
+        value = _identifier(item.get(field))
+        if value is None:
+            raise UpstreamProtocolError(_PROTOCOL_ERROR)
+        name = item.get(label)
+        if name is not None and not isinstance(name, str):
+            raise UpstreamProtocolError(_PROTOCOL_ERROR)
+        return ConversationRef(
+            "qq", self._account, f"{kind}:{value}", name or value, kind
+        )
+
+
+def _data(response: object) -> dict[str, Any]:
+    if not isinstance(response, dict):
+        raise UpstreamProtocolError(_PROTOCOL_ERROR)
     data = response.get("data")
-    if response.get("success") is not True or not isinstance(data, dict): raise UpstreamProtocolError("Source response did not match the locked contract.")
+    if response.get("success") is not True or not isinstance(data, dict):
+        raise UpstreamProtocolError(_PROTOCOL_ERROR)
     return data
+
+
+def _integer(value: object) -> TypeGuard[int]:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _identifier(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value
+    if _integer(value):
+        return str(value)
+    return None
+
+
+def _timestamp(value: object) -> int | None:
+    if not _integer(value):
+        return None
+    return value * 1000 if value < 100_000_000_000 else value
+
+
+def _page_values(
+    data: Mapping[str, Any], key: str, page: int
+) -> tuple[list[Any], bool]:
+    current = data.get("currentPage")
+    has_next = data.get("hasNext")
+    if not _integer(current) or current != page or not isinstance(has_next, bool):
+        raise PaginationError(_PAGINATION_ERROR)
+    values = data.get(key)
+    if not isinstance(values, list):
+        raise UpstreamProtocolError(_PROTOCOL_ERROR)
+    return values, has_next
+
+
 def _peer(value: str) -> tuple[int, str]:
+    if not isinstance(value, str):
+        raise ValueError("QCE conversation id must include a peer kind")
     kind, separator, uid = value.partition(":")
-    if not separator or not uid: raise ValueError("QCE conversation id must include a peer kind")
-    if kind == "friend": return 1, uid
-    if kind == "group": return 2, uid
+    if not separator or not uid.strip():
+        raise ValueError("QCE conversation id must include a peer kind")
+    if kind == "friend":
+        return 1, uid
+    if kind == "group":
+        return 2, uid
     raise ValueError("QCE conversation id has an unsupported peer kind")
-def _message(item: Mapping[str, Any], conversation: str, order: int) -> SourceMessage:
-    stamp = item.get("msgTime") if isinstance(item.get("msgTime"), int) and not isinstance(item.get("msgTime"), bool) else None
-    if stamp is not None and stamp < 100000000000: stamp *= 1000
-    identifier = item.get("msgId"); elements = item.get("elements", [])
-    text = "".join(part["textElement"]["content"] for part in elements if isinstance(part, dict) and isinstance(part.get("textElement"), dict) and isinstance(part["textElement"].get("content"), str)) if isinstance(elements, list) else ""
-    return SourceMessage(str(identifier) if isinstance(identifier, (str, int)) else None, conversation, stamp, text or None, order)
+
+
+def _message_text(item: Mapping[str, Any]) -> str | None:
+    elements = item.get("elements", [])
+    if not isinstance(elements, list):
+        raise UpstreamProtocolError(_PROTOCOL_ERROR)
+    parts: list[str] = []
+    for element in elements:
+        if not isinstance(element, dict):
+            raise UpstreamProtocolError(_PROTOCOL_ERROR)
+        text = element.get("textElement")
+        if text is None:
+            continue
+        if not isinstance(text, dict) or not isinstance(text.get("content"), str):
+            raise UpstreamProtocolError(_PROTOCOL_ERROR)
+        parts.append(text["content"])
+    return "".join(parts) or None
