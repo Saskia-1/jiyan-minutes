@@ -8,15 +8,15 @@
 2. 创建隔离的本地开发环境并安装锁定的测试依赖：
 
    ```sh
-   python3 -m venv .venv
-   .venv/bin/python -m pip install --upgrade pip
-   .venv/bin/python -m pip install -e "./backend[dev]"
+   python3 -m venv backend/.venv
+   backend/.venv/bin/python -m pip install --upgrade pip
+   backend/.venv/bin/python -m pip install -e "./backend[dev]"
    ```
 
 3. 运行测试：
 
    ```sh
-   make test PYTHON=.venv/bin/python
+   make test PYTHON=backend/.venv/bin/python
    ```
 
    该命令安装且仅锁定开发测试依赖 `pytest==9.1.1`；项目尚未声明其他运行依赖。
