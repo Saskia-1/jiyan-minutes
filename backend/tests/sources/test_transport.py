@@ -39,6 +39,29 @@ class ChunkedStream(httpx.SyncByteStream):
         pass
 
 
+class TrackingStream(ChunkedStream):
+    """Synthetic response stream that records closure by the HTTP client."""
+
+    def __init__(self, chunks: Iterable[bytes]) -> None:
+        super().__init__(chunks)
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class TrackingMockTransport(httpx.MockTransport):
+    """Synthetic network transport that records client lifecycle closure."""
+
+    def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
+        super().__init__(handler)
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+        super().close()
+
+
 def mock_transport(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.MockTransport:
     return httpx.MockTransport(handler)
 
@@ -57,6 +80,34 @@ def qce_transport(
 
 
 class LoopbackTransportTests(unittest.TestCase):
+    def test_exposes_a_public_close_method(self) -> None:
+        """Callers need an explicit lifecycle boundary for the owned client."""
+        transport = qce_transport(
+            mock_transport(lambda _request: httpx.Response(200, json={"success": True}))
+        )
+        self.assertTrue(callable(getattr(transport, "close", None)))
+
+    def test_context_manager_closes_response_and_client_and_blocks_later_requests(self) -> None:
+        """Close must free owned resources and make later reads fail without details."""
+        stream = TrackingStream((b'{"success": true}',))
+        test_transport = TrackingMockTransport(
+            lambda _request: httpx.Response(200, stream=stream)
+        )
+        with qce_transport(test_transport) as transport:
+            self.assertEqual(transport.request("GET", "/health", headers={}), {"success": True})
+            self.assertTrue(stream.closed)
+            self.assertEqual(test_transport.close_calls, 0)
+
+        self.assertEqual(test_transport.close_calls, 1)
+        transport.close()
+        self.assertEqual(test_transport.close_calls, 1)
+        with self.assertRaises(TransportError) as raised:
+            transport.request("GET", "/health", headers={})
+        self.assertIs(type(raised.exception), TransportError)
+        self.assertEqual(str(raised.exception), "Source transport is closed.")
+        self.assertNotIn(SENTINEL, repr(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
+
     def test_rejects_complete_http_clients_as_injection(self) -> None:
         """A configured client could add proxy, auth, cookies, or hooks after validation."""
         client = httpx.Client(follow_redirects=False, trust_env=False, timeout=httpx.Timeout(5.0))
@@ -114,6 +165,41 @@ class LoopbackTransportTests(unittest.TestCase):
             {"success": True},
         )
         self.assertEqual(len(seen), 2)
+
+    def test_response_cookies_are_never_replayed_on_the_next_request(self) -> None:
+        """A source-controlled Set-Cookie must not become ambient authentication."""
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            self.assertNotIn("cookie", request.headers)
+            if len(seen) == 1:
+                return httpx.Response(
+                    200,
+                    headers={"set-cookie": "session=" + SENTINEL + "; Path=/"},
+                    json={"success": True},
+                )
+            return httpx.Response(200, json={"success": True})
+
+        transport = qce_transport(mock_transport(handler))
+        self.assertEqual(transport.request("GET", "/health", headers={}), {"success": True})
+        self.assertEqual(transport.request("GET", "/health", headers={}), {"success": True})
+        self.assertEqual(len(seen), 2)
+        self.assertNotIn(SENTINEL, repr(transport))
+
+        failing_transport = qce_transport(
+            mock_transport(
+                lambda _request: httpx.Response(
+                    503,
+                    headers={"set-cookie": "session=" + SENTINEL + "; Path=/"},
+                    content=b"upstream failure",
+                )
+            )
+        )
+        with self.assertRaises(UpstreamHttpError) as raised:
+            failing_transport.request("GET", "/health", headers={})
+        self.assertNotIn(SENTINEL, str(raised.exception))
+        self.assertNotIn(SENTINEL, repr(raised.exception))
 
     def test_default_source_contract_fails_closed_and_only_allows_locked_routes(self) -> None:
         """An unbound or broadened transport could send or administrate upstream data."""

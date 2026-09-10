@@ -7,8 +7,8 @@ import json as json_module
 import math
 import re
 from collections.abc import Callable, Mapping
-from types import MappingProxyType
-from typing import Any
+from types import MappingProxyType, TracebackType
+from typing import Any, Self
 from urllib.parse import unquote_plus
 
 import httpx
@@ -116,6 +116,7 @@ class LoopbackTransport:
         self._url = url
         self._cap = max_body_bytes
         self._allowed_requests = _SOURCE_ALLOWLIST.get(source, frozenset())
+        self._closed = False
         self._client = httpx.Client(
             transport=mock_transport,
             follow_redirects=False,
@@ -126,6 +127,28 @@ class LoopbackTransport:
     def __repr__(self) -> str:
         return "<LoopbackTransport>"
 
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Release the owned client; safe to call more than once."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._client.cookies.clear()
+            self._client.close()
+        except Exception:
+            raise TransportError("Source transport could not close.") from None
+
     def request(
         self,
         method: str,
@@ -135,8 +158,11 @@ class LoopbackTransport:
         params: Mapping[str, object] | None = None,
         json: object | None = None,
     ) -> dict[str, Any]:
+        if self._closed:
+            raise TransportError("Source transport is closed.")
         self._validate_request(method, path, headers, params)
         try:
+            self._client.cookies.clear()
             with self._client.stream(
                 method,
                 self._url.copy_with(path=path),
@@ -156,6 +182,8 @@ class LoopbackTransport:
                         body.extend(chunk)
         except Exception:
             raise TransportError("Source transport failed.") from None
+        finally:
+            self._client.cookies.clear()
         if 300 <= status_code < 400:
             raise RedirectRejected("Source redirect rejected.")
         if status_code >= 400:
