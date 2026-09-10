@@ -78,6 +78,7 @@ class SourceCapability(BaseModel):
 
     def mark_unsupported(self) -> "SourceCapability":
         """Explicitly stop configuration when the source is unsupported."""
+        self._reject_terminal_state_change()
         return self.model_copy(
             update={"status": SourceStatus.UNSUPPORTED, "verified_fingerprint": None}
         )

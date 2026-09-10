@@ -164,6 +164,19 @@ class SourceCapabilityTests(unittest.TestCase):
                 )
                 self.assertEqual(ready.status, SourceStatus.READY)
 
+    def test_mark_unsupported_rejects_a_blocked_source_but_accepts_unconfigured(self) -> None:
+        """Changing one terminal state into another must require reconfiguration first."""
+        blocked = SourceCapability(source_id="qq").evaluate_requirements(
+            user_approved=False, requirements_safe=True
+        )
+
+        with self.assertRaisesRegex(ValueError, "fresh configuration session"):
+            blocked.mark_unsupported()
+        self.assertEqual(
+            SourceCapability(source_id="qq").mark_unsupported().status,
+            SourceStatus.UNSUPPORTED,
+        )
+
     def test_declined_requirement_blocks_without_a_fallback(self) -> None:
         """Falling back after a declined operation could bypass user choice."""
         blocked = SourceCapability(source_id="qq").evaluate_requirements(
