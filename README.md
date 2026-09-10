@@ -5,6 +5,20 @@
 ## 本地开发
 
 1. 复制 `.env.example` 到工作区外的受限位置后按需配置；示例文件中的秘密字段必须保持为空。
-2. 安装开发依赖后运行 `make test`。
+2. 创建隔离的本地开发环境并安装锁定的测试依赖：
+
+   ```sh
+   python3 -m venv .venv
+   .venv/bin/python -m pip install --upgrade pip
+   .venv/bin/python -m pip install -e "./backend[dev]"
+   ```
+
+3. 运行测试：
+
+   ```sh
+   make test PYTHON=.venv/bin/python
+   ```
+
+   该命令安装且仅锁定开发测试依赖 `pytest==9.1.1`；项目尚未声明其他运行依赖。
 
 服务仅计划监听 `127.0.0.1`。真实聊天源、第三方工具或账号均不会由本项目自动安装、启动或访问。

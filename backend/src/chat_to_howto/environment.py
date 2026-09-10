@@ -78,6 +78,9 @@ def _read_application_metadata(app_path: Path) -> VersionArchitecture:
     except (OSError, plistlib.InvalidFileException, ValueError):
         return VersionArchitecture(version="unknown", architecture="unknown")
 
+    if not isinstance(metadata, dict):
+        return VersionArchitecture(version="unknown", architecture="unknown")
+
     version = metadata.get("CFBundleShortVersionString") or metadata.get("CFBundleVersion")
     architecture = metadata.get("LSArchitecturePriority")
     if isinstance(architecture, list) and architecture and isinstance(architecture[0], str):
@@ -101,4 +104,3 @@ def _python_metadata(architecture: str) -> VersionArchitecture:
 
 def _value_or_unknown(value: object) -> str:
     return value if isinstance(value, str) and value else "unknown"
-

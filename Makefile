@@ -1,5 +1,5 @@
+PYTHON ?= python3
+
 .PHONY: test
-
 test:
-	python3 -m pytest backend/tests -q
-
+	$(PYTHON) -m pytest backend/tests -q

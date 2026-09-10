@@ -64,3 +64,18 @@ class EnvironmentInventoryTests(unittest.TestCase):
         )
         self.assertNotIn(str(plist_path), json.dumps(report, sort_keys=True))
 
+    def test_valid_non_dictionary_plist_returns_unknown_metadata(self) -> None:
+        """A plist list is valid data but cannot provide bundle metadata."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            app_path = Path(temporary_directory) / "QQ.app"
+            plist_path = app_path / "Contents" / "Info.plist"
+            plist_path.parent.mkdir(parents=True)
+            with plist_path.open("wb") as stream:
+                plistlib.dump(["valid", "plist", "array"], stream)
+
+            report = collect_environment({"qq": app_path}).public_dict()
+
+        self.assertEqual(
+            report["applications"]["qq"],
+            {"version": "unknown", "architecture": "unknown"},
+        )
