@@ -90,12 +90,15 @@ class SourceCapability(BaseModel):
         current_fingerprint: SourceFingerprint,
         export_scope: ConsentScope,
         export_consent: ConsentRecord,
+        evidence_class: str,
     ) -> "SourceCapability":
         """Only a successful, versioned verification can make a source ready."""
         if self.status in {SourceStatus.BLOCKED, SourceStatus.UNSUPPORTED}:
             raise ValueError("blocked or unsupported source cannot be verified")
         if self.configuration_nonce is None:
             raise ValueError("ready status requires a configuration session")
+        if evidence_class != "real_device":
+            raise ValueError("ready status requires real-device evidence")
         if fingerprint != current_fingerprint:
             raise ValueError("verification fingerprint must match the current fingerprint")
         if (

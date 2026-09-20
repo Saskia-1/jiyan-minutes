@@ -1,10 +1,11 @@
 # Locked source contracts (P0)
 
-This is a record of public primary-source research and synthetic adapter
-contracts, **not** evidence of an installation, device test, tool launch,
-token/key entry, or chat export. No candidate is `ready` on the strength of
-this document. A concrete setup confirmation and a separately recorded,
-user-selected narrow real-source check are required before that status changes.
+This is a record of public primary-source research, offline packaged-asset
+static audit, and synthetic adapter contracts, **not** evidence of an
+installation, device test, tool launch, token/key entry, or chat export. No
+candidate is `ready` on the strength of this document. Both audited binaries
+are currently NO-GO; a future replacement would have to pass its own gates
+before a separately confirmed, user-selected narrow real-source check.
 
 The platform adapter is read-only and has no generic upstream-request escape
 hatch. It never sends messages, deletes upstream data, performs SQL, enables
@@ -13,7 +14,7 @@ accounts, or closes/restarts/logs into either client. Refusal, unsupported
 versions, missing evidence, or a required boundary exception are safe stops;
 they are not invitations to find a workaround.
 
-## QQ Chat Exporter (QCE) — candidate only
+## QQ Chat Exporter (QCE) — blocked after binary audit
 
 **Source and supply chain.** The public author repository is
 [`shuakami/qq-chat-exporter`](https://github.com/shuakami/qq-chat-exporter).
@@ -24,15 +25,36 @@ Its annotated tag resolves to commit
 `6eac56ba049a20343ceb34f42d28dea5a2ab68a9`); these are the fixed source
 references used below, not `master`. The macOS arm64 preview asset is
 `NapCat-QCE-macOS-arm64-v6.2.10.tar.gz`; the release metadata publishes
-SHA-256 `c4156259a99232ff0fab9a59d90cd76e0581f75fde9ccab85f26d48096ef748e`.
-It has not been downloaded or independently hashed here, and the annotated
-tag is reported unsigned. The source license is GPL-3.0; distribution or
-modification obligations, third-party notices, QQ/NapCat terms, and the
-release asset's notices have not been independently audited.
+size 41,657,553 bytes and SHA-256
+`c4156259a99232ff0fab9a59d90cd76e0581f75fde9ccab85f26d48096ef748e`.
+The official asset was downloaded to a private temporary audit directory; its
+actual size and independently calculated SHA-256 match exactly. The GitHub
+Release API reported `immutable: false`, and the annotated tag and target
+commit are unsigned, so this fixes an audit baseline rather than proving an
+immutable or authenticated release.
+
+The unpacked archive contained 985 safely preflighted entries and four arm64
+Mach-O files. `qce-server`, `napi2native`, and `MoeHoo` are only ad-hoc/linker
+signed with no Team ID; `ffmpegAddon` is unsigned. `spctl` rejected
+`qce-server`, and no Developer ID, notarization, sealed-resources, or other
+Gatekeeper-acceptance evidence was obtained.
+The launcher explicitly clears extended attributes with `xattr -cr`.
+`napi2native` statically contains Frida Gum interception and Mach memory/thread
+APIs, including send/recv replacement. The bundle has no product-level
+`LICENSE`, `NOTICE`, `THIRD_PARTY`, SBOM, or lockfile and does not provide a
+complete native-component attribution set. QCE source is GPL-3.0, while
+bundled NapCat and UI text add separate/custom usage terms. These results make
+the fixed binary **NO-GO** for installation or real-chat testing. Full evidence
+and hashes are in [`ultra-gate-1-binary-audit.md`](ultra-gate-1-binary-audit.md).
 
 **Client/architecture and access impact.** The documented macOS route is an
 Apple Silicon/M1+ **preview** (no official Intel package in the reviewed
-material). It requires QQ.app in `/Applications` or `~/Applications`, Xcode
+material). The locally installed QQ is `7.0.1` build `52892`, with a universal
+x86_64/arm64 main executable and App Sandbox enabled. QCE's release gives a
+generic minimum QQ build `34606` and recommends `9.9.19-34740`, but no upstream
+evidence was found for the exact macOS combination QQ `7.0.1-52892` + QCE
+`6.2.10`; numeric build comparison across these product version lines is not
+compatibility proof. It requires QQ.app in `/Applications` or `~/Applications`, Xcode
 CLI signing tools, and about 1.5 GB free space. It creates a roughly 1 GB
 `QQNapCatRuntime.app` beside the unpacked tool by copying QQ.app, patching the
 copy's `package.json` to load NapCat, and locally re-signing it. The copy
@@ -45,6 +67,12 @@ view mode avoids QQ login but live friends, groups, message-fetch, and new
 export functions return `503 STANDALONE_MODE`. These are material client
 changes and conflict with the current no-client-modification boundary unless a
 user specifically approves them; this document grants no such approval.
+That approval model would apply only to a future candidate that has already
+passed its supply-chain gate; it cannot unlock the audited v6.2.10 binary.
+The audited launcher may also move a pre-existing link target to a
+`.qce-unlinked-backup`. Its local bridge port-conflict handler finds a listener
+with `lsof` and sends `SIGTERM` without first proving that the process belongs
+to QCE. These are additional safe-stop conditions, not approved setup steps.
 
 **Service and allowed adapter surface.** QCE defaults to port `40653` and its
 implementation binds `0.0.0.0`, although its UI describes local use. Its own
@@ -106,22 +134,30 @@ side effects, and it does not call QCE cancellation or any write endpoint.
 Setup must disclose these residues and give the user the tool's own,
 version-verified cleanup steps; none are performed by this adapter.
 
-**Network/telemetry.** The reviewed project claims local read/parse and no
-project server transfer, but that is not a binary or dependency network audit.
-QCE talks to the local NapCat bridge; enabling avatars/media can contact QQ/
-NapCat services, and avatar paths use Tencent image domains. The adapter
-disables those paths by not requesting avatars, resources, media, roaming, or
-export features. No complete telemetry/DNS/third-party-component inventory,
-actual runtime request trace, or guaranteed update-disable mechanism was
-verified; it must be stated as unknown, not "no telemetry".
+**Network/telemetry.** Static packaged-code inspection found GitHub release/
+repository checks, npmmirror font loading, Vercel Analytics, CDN fallback,
+plugin indexes, and proxy/mirror endpoints. QCE also talks to the local NapCat
+bridge; enabling avatars/media can contact QQ/NapCat services, and avatar paths
+use Tencent image domains. The adapter disables those optional paths by not
+requesting avatars, resources, media, roaming, or export features, but cannot
+disable the tool's whole network surface. No static evidence explicitly showed
+chat-body exfiltration; opaque native modules and the lack of a runtime network
+trace mean this is not proof of no exfiltration or telemetry. The standalone
+launcher can print the local token and a tokenized URL, and the WebUI contains
+a user-URL proxy surface, so the token must be treated as a broad sensitive
+capability.
 
-**Decision criteria.** A real success requires an approved QCE version/asset,
+**Decision criteria.** The audited v6.2.10 asset is currently rejected before
+installation. Re-evaluation first requires an authenticated, license-complete,
+auditable release and explicit compatibility evidence for local QQ. A real
+success would then require an approved QCE version/asset,
 the disclosed client change, a user-selected account/conversation/narrow
 range, saved normalized local files, and separately recorded range/count and
 completeness evidence. Health, login, a cache hit, or documentation alone is
-not success. Refuse/safe-stop before installation or connection if the user
-does not approve copied/re-signed QQ, required logout/relogin, data linking,
-or the non-loopback upstream listener. Fail/stop on unavailable source,
+not success. For a future gate-passing candidate, refuse/safe-stop before
+installation or connection if the user does not approve copied/re-signed QQ,
+required logout/relogin, data linking, or the non-loopback upstream listener;
+approval of those effects does not override the current binary NO-GO. Fail/stop on unavailable source,
 invalid/expired token, standalone mode, account/client/version change,
 pagination uncertainty, range mismatch, or cancellation; retain only the
 explicitly disclosed local residue and never report a cancelled/partial read
@@ -132,40 +168,80 @@ Fixed-source pointers: [commit tree](https://github.com/shuakami/qq-chat-exporte
 [server entry](https://raw.githubusercontent.com/shuakami/qq-chat-exporter/cf8924d4790ddd857f5e26cca2b0163e4ec3b44f/qq-chat-export-server/src/main.rs),
 and [message routes](https://raw.githubusercontent.com/shuakami/qq-chat-exporter/cf8924d4790ddd857f5e26cca2b0163e4ec3b44f/qq-chat-export-server/src/api/routes/messages.rs).
 
-## TraceMemo — blocked pending immutable supply-chain proof and consent
+## TraceMemo — blocked after binary audit
 
 **Source/version status.** The public author repository is
 [`Wxw-Gu/TraceMemo`](https://github.com/Wxw-Gu/TraceMemo); its public release
 channel identifies [`v2.3.0`](https://github.com/Wxw-Gu/TraceMemo/releases/tag/v2.3.0)
-as the candidate (release 2026-09-05; tag page date 2026-09-02). Public
-material only exposed short SHA `4019051`. The full commit, annotated/signed
-tag status, asset/DMG SHA-256, signing/notarization, SBOM, and dependency
-notices are **unresolved**. Do not invent the remaining SHA or claim that the
-release binary is locked. The detailed HTTP/cache/update observations were
-read from the moving `main` source during research; they are evidence of that
-review only, not proof that `v2.3.0` contains those exact routes. A
-version-pinned code URL cannot be honestly supplied until the full commit/tag
-contents are independently confirmed; treat the route-to-release association
-as unresolved. The repository has no identified `LICENSE`/`COPYING`/`NOTICE`
-or `package.json` license field in the reviewed material, so installation,
-deployment, modification, or distribution is blocked pending written license
-authority and third-party notices.
+as the candidate (published 2026-09-05). The lightweight tag resolves directly
+to full commit `40190511fcad656ce439eece2201f1eb9a0d9352`; GitHub reports that
+commit as unsigned. Release metadata publishes macOS arm64 ZIP size
+226,870,607 bytes/SHA-256
+`d8089eb4b0b6a486bfa9c55e44a0ad609bb8945bfe151bb83f02cfe352bd29a9`
+and DMG size 234,566,020 bytes/SHA-256
+`92ec7d0a4f4f0274227ec55e9608ef88f9d826b8033b7034d2c5a74ad3950460`.
+The official DMG was downloaded to a private temporary audit directory; its
+actual size and independently calculated SHA-256 match exactly, and
+`hdiutil verify` reported valid CRCs. The tagged source `package.json` still
+declares `2.2.3`, while the packaged `Info.plist` and ASAR package metadata say
+`2.3.0`; the release/source discrepancy remains unexplained.
+The GitHub Release API reports `immutable: false`; recording the tag commit
+and published digests fixes this audit baseline but does not prove that the
+remote release record or assets are immutable.
+
+The fixed tree has no root standard `LICENSE`/`COPYING`/`NOTICE`, its
+`package.json` has no license field, and GitHub's repository-license endpoint
+returns 404. The README instead gives custom terms for personal learning,
+modification/forking, and noncommercial use while restricting unauthorized
+commercial use. Those terms do not establish a standard open-source license
+or complete redistribution rights, and component-specific third-party
+licenses do not license the whole application. Its packaged build
+configuration sets `notarize: false`, enables
+JIT, unsigned executable memory, and DYLD environment variables, and includes
+an executable `resources/xkey_helper` blob (343,488 bytes; Git blob
+`1c9b951830de80ef672d14a35bf28bb3a0eda49a`). The packaged helper has that same
+Git blob identity, but this is an opaque binary correspondence, not source
+provenance.
+
+The audited DMG is unsigned. The App has no Developer ID or Team ID, lacks
+sealed resources and Hardened Runtime, and fails deep strict signature
+verification. Of 34 inspected Mach-O paths, 0 had a Team ID; 19 were invalidly
+signed or unsigned. Both slices of `xkey_helper` and `libwx_key.dylib` report
+invalid signatures. Gatekeeper did not accept the package and no valid stapled
+notarization ticket was verified. ASAR header integrity matches its untrusted
+`Info.plist` value, but that file is not bound to a trusted publisher signature.
+The package has dependency-level license files but no product-level license,
+SBOM, `THIRD_PARTY`, or complete native-component attribution. The fixed binary
+is therefore **NO-GO** for installation or real-chat testing. Full evidence and
+hashes are in [`ultra-gate-1-binary-audit.md`](ultra-gate-1-binary-audit.md).
 
 **Supported client/architecture and key boundary.** Public materials say macOS
 Apple Silicon/arm64 only, not Intel. The only fully tested macOS WeChat
-combination reported is `4.1.8.100`; WeChat `4.1.13` is explicitly unverified,
-as are other 4.x compatibility, minimum macOS, enterprise WeChat, and actual
-device behavior. Automatic DB-key acquisition checks that SIP is disabled,
+combination reported is `4.1.8.100`; the locally installed WeChat `4.1.13`
+is not listed as tested and is therefore unverified, not an upstream-declared
+incompatibility. The packaged App declares macOS 12, but audited key/WCDB native
+libraries declare a macOS 15 minimum; enterprise WeChat and actual device
+behavior are also unverified. Automatic DB-key acquisition checks that SIP is
+disabled,
 then requests administrator authorization and scans the running WeChat
 process's memory through `xkey_helper`. That path requires a separate,
 high-risk system exception and is outside this project: the platform exposes
 no DB-key extraction, memory scanning, SIP change, admin elevation, or
-TraceMemo cloud-AI-key configuration. A manually supplied key may be a
-TraceMemo alternative, but this platform does not receive, persist, log, or
-ask for that key. If an already initialized tool cannot be used without those
-actions, the source remains `blocked`.
+TraceMemo cloud-AI-key configuration. A manually supplied key could only be
+considered for a future candidate that first passes the binary, license, and
+compatibility gates; it does not make this audited v2.3.0 asset acceptable.
+This platform never receives, persists, logs, or asks for that key.
 
-**Service and read-only contract.** The reviewed main-source defaults are a
+The fixed source reads WeChat 4.x data below the selected account's
+`xwechat_files/.../db_storage` tree and opens it through bundled native WCDB
+components using a 64-hex-character database key. It stores a manually entered
+per-account key through Electron `safeStorage` in a mode-`0600` file; on macOS
+`safeStorage` uses Keychain-backed protection and may display a system prompt.
+Neither this observation nor Tencent WCDB's public SQLite/SQLCipher heritage
+proves the exact WeChat `4.1.13` schema, cipher parameters, or database shard
+format. No verified importer for WeChat's official backup format was found.
+
+**Service and read-only contract.** The reviewed packaged code defaults are a
 loopback server at `127.0.0.1:6131`, enabled by default. `/api/v1/health` is
 unauthenticated liveness only; it is never readiness evidence. The scoped
 adapter can use only `GET /api/v1/contact` and `GET /api/v1/chatlog` with the
@@ -174,7 +250,9 @@ return, persist, or URL-encode that token. It rejects every other route,
 including send, report, agent, SQL, monitor, anti-recall, media,
 group-snapshot, scheduled-report, token-management, and AI paths. The tool's
 own token is a broad same-machine bearer capability, not a per-conversation or
-time-scoped permission model.
+time-scoped permission model: the same token also authorizes scheduled-task
+writes/execution and `/agent/send`, and the tool can be configured for a
+non-loopback host.
 
 | Surface | Exact fields and adapter interpretation |
 | --- | --- |
@@ -189,7 +267,7 @@ cursor, offset, or limit and may return all matching local history; `contact`
 also lacks a verified page/limit. The adapter over-reads whole Unix seconds
 around a requested millisecond `[start,end)` and filters locally, but a
 same-second saturation cannot be made complete by time slicing. Thus every
-successful TraceMemo fetch is `unknown`, never complete. Reviewed main code
+successful TraceMemo fetch is `unknown`, never complete. Reviewed tagged code
 also creates user-data JSON bootstrap caches (contacts/account data, up to 768
 message buckets × last 120 items, and up to 768 group snapshots). Optional
 anti-recall is out of scope and must remain off: it can write WeChat DB journal
@@ -210,22 +288,28 @@ timeout phase, not a total-operation deadline). An over-limit response fails
 without returning a successful page. The byte cap is a local response guard,
 not a promise to bound upstream work or all intermediate decoding allocations.
 
-**Network/telemetry and controls.** Remote AI Search/daily report/image
-features, Agent Hub, and experimental share-card infrastructure are separate
-external-transfer paths when configured/used. The adapter neither configures
-them nor calls them. Reviewed main code schedules an update check about 1.5
-seconds after startup; macOS automatic download/install is disabled there, but
-the check itself is network activity. The adapter cannot prove or enforce a
-tool-wide update/telemetry disable switch. No standalone analytics/crash SDK
-or complete runtime endpoint inventory was found in the limited review; that
-does **not** establish zero telemetry. Any real setup must disclose and, where
-the version actually supports it, disable API/AI/Agent/share/anti-recall and
-nonessential update behavior before use; unknown controls are a stop condition
-for an approved no-network requirement.
+**Network/telemetry and controls.** Packaged main-process code shows that first
+launch is not a passive offline initialization. It defaults to the
+`127.0.0.1:6131` API, unconditionally starts an Agent Hub at
+`127.0.0.1:5300`, executes packaged `wechat-connector accounts --json`, may
+start that connector at `127.0.0.1:18011` for an existing account, starts the
+daily-report scheduler, and checks GitHub for updates after about 1.5 seconds.
+macOS automatic update download/install is disabled, but the check is still
+network activity. The connector statically includes QR login, text/media send,
+media upload, inbound webhook, and local HTTP API capabilities. Remote AI,
+Fish Audio, Hugging Face models, share-card upload, and remote avatar paths are
+also present as optional external-transfer surfaces. The adapter neither
+configures nor calls them, but cannot prevent the tool from starting its own
+services or prove a tool-wide offline/telemetry-disable mode.
 
-**Decision criteria.** A future success requires: written license/notice
-authority; an independently fixed full release commit and asset integrity;
-an approved arm64/WeChat combination (4.1.13 remains unverified until tested);
+**Decision criteria.** The audited v2.3.0 asset is rejected before installation,
+including when a user already lawfully possesses a database key. Re-evaluation
+requires a Developer ID-signed/notarized and strictly verifiable immutable
+artifact, explained/reproducible source-version correspondence, product license
+and full native-component attribution, explicit WeChat 4.1.13 support, and a
+way to disable update, Agent Hub, connector, scheduler and external-AI startup
+surfaces. A future success would additionally require an approved arm64/WeChat
+combination;
 an already initialized route that does not require SIP/admin/memory scanning;
 an approved narrow source read; and saved files whose range/count limitations
 are recorded as `unknown`. Health 200, a token, or a contact list is not
@@ -234,10 +318,11 @@ license/supply-chain proof, non-loopback service, client/account/version
 change, token/DB-not-ready error, non-disambiguated conversation, no-page
 response risk the user has not accepted, cancellation, or range mismatch.
 
-Candidate release/tag pointers (movable references, not immutable source proof;
-the full SHA remains unresolved):
-[release](https://github.com/Wxw-Gu/TraceMemo/releases/tag/v2.3.0) and
-[tag tree](https://github.com/Wxw-Gu/TraceMemo/tree/v2.3.0).
+Fixed candidate pointers:
+[release](https://github.com/Wxw-Gu/TraceMemo/releases/tag/v2.3.0),
+[commit tree](https://github.com/Wxw-Gu/TraceMemo/tree/40190511fcad656ce439eece2201f1eb9a0d9352),
+[macOS build configuration](https://github.com/Wxw-Gu/TraceMemo/blob/40190511fcad656ce439eece2201f1eb9a0d9352/electron-builder.yml), and
+[first-use requirements](https://github.com/Wxw-Gu/TraceMemo/blob/40190511fcad656ce439eece2201f1eb9a0d9352/docs/user-guide/getting-started.md).
 
 ## Normalized messages and completeness evidence
 

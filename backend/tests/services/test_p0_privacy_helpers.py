@@ -13,7 +13,7 @@ import sys
 
 import pytest
 
-from conftest import PrivacyScan, register_p0_privacy_scan
+from conftest import PrivacyScan, REVIEWED_TRACKED_TEXT, register_p0_privacy_scan
 from ._writer_probe import ArtifactProbe, inode
 
 
@@ -225,3 +225,13 @@ def test_nested_p0(guard):
         assert "1 passed" in output
         assert "ordinary-safe-diagnostic" in output
         assert "privacy_sentinel_leak" not in output
+
+
+def test_task4_runtime_authority_files_are_inside_the_explicit_privacy_review_boundary():
+    """Dropping a Task4 authority module from the explicit scan would hide a checked-in leak."""
+    assert {
+        "backend/src/chat_to_howto/db.py",
+        "backend/src/chat_to_howto/main.py",
+        "backend/src/chat_to_howto/services/p0_verifier.py",
+        "backend/src/chat_to_howto/sources/factory.py",
+    } <= set(REVIEWED_TRACKED_TEXT)

@@ -20,10 +20,12 @@ class ArtifactProbe:
         self.before_mkdir = None
         self.real_open = os.open
         self.real_mkdir = os.mkdir
+        self.real_link = os.link
         self.real_replace = os.replace
         self.real_fsync = os.fsync
         monkeypatch.setattr(os, "open", self.open)
         monkeypatch.setattr(os, "mkdir", self.mkdir)
+        monkeypatch.setattr(os, "link", self.link)
         monkeypatch.setattr(os, "replace", self.replace)
         monkeypatch.setattr(os, "fsync", self.fsync)
 
@@ -49,7 +51,7 @@ class ArtifactProbe:
         if resolved is not None and (resolved == self.root or self.owned(resolved)):
             if stat.S_ISDIR(metadata.st_mode):
                 self.directories[key] = resolved
-            elif flags & os.O_CREAT:
+            elif flags & os.O_CREAT and resolved.name != ".p0-owner":
                 self.created_files[key] = resolved
                 self.events.append(("create", key, resolved, flags))
             elif key in self.created_files and flags & os.O_ACCMODE == os.O_RDONLY:
@@ -90,3 +92,40 @@ class ArtifactProbe:
                 self.events.append(("commit", committed, destination_path))
                 return
         self.real_replace(source, destination, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    def link(
+        self,
+        source,
+        destination,
+        *,
+        src_dir_fd=None,
+        dst_dir_fd=None,
+        follow_symlinks=True,
+    ):
+        source_path = self.path(source, src_dir_fd)
+        destination_path = self.path(destination, dst_dir_fd)
+        if self.owned(source_path):
+            key = inode(os.stat(source, dir_fd=src_dir_fd, follow_symlinks=False))
+            if key in self.created_files:
+                self.events.append(("replace_attempt", key, destination_path))
+                if self.failure == "replace":
+                    raise OSError("synthetic_replace_failure")
+                self.real_link(
+                    source,
+                    destination,
+                    src_dir_fd=src_dir_fd,
+                    dst_dir_fd=dst_dir_fd,
+                    follow_symlinks=follow_symlinks,
+                )
+                committed = inode(
+                    os.stat(destination, dir_fd=dst_dir_fd, follow_symlinks=False)
+                )
+                self.events.append(("commit", committed, destination_path))
+                return
+        self.real_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )

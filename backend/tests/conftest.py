@@ -43,12 +43,16 @@ PUBLIC_JOB_FIELDS = PUBLIC_JOB_REQUIRED_FIELDS | PUBLIC_JOB_OPTIONAL_FIELDS
 REVIEWED_TRACKED_TEXT = (
     "backend/pyproject.toml",
     "backend/src/chat_to_howto/config.py",
+    "backend/src/chat_to_howto/db.py",
     "backend/src/chat_to_howto/environment.py",
+    "backend/src/chat_to_howto/main.py",
     "backend/src/chat_to_howto/domain/consent.py",
     "backend/src/chat_to_howto/domain/sources.py",
     "backend/src/chat_to_howto/security/redaction.py",
     "backend/src/chat_to_howto/security/secrets.py",
+    "backend/src/chat_to_howto/services/p0_verifier.py",
     "backend/src/chat_to_howto/sources/base.py",
+    "backend/src/chat_to_howto/sources/factory.py",
     "backend/src/chat_to_howto/sources/qce.py",
     "backend/src/chat_to_howto/sources/tracememo.py",
     "backend/src/chat_to_howto/sources/transport.py",
@@ -87,14 +91,13 @@ class RecordingSecretStore(InMemorySecretStore):
 class SyntheticAdapter:
     """Implements the existing adapter boundary, with observable scoped reads."""
 
-    evidence_class = "synthetic"
-
     def __init__(self, factory, source_id, account_id):
         self.factory = factory
         self.source_id = source_id
         self.account_id = account_id
         self.cancelled = False
         self.fingerprint = factory.fingerprint
+        self.evidence_class = factory.evidence_class
 
     def health(self):
         return SourceHealth(available=True, ready=True)
@@ -103,6 +106,12 @@ class SyntheticAdapter:
         return ("fixture-account", "fixture-account-2")
 
     def list_conversations(self):
+        if self.factory.require_secret:
+            access, consent = self.factory.secret_grant
+            value = self.factory.secret_store.get(access=access, consent=consent)
+            if value != self.factory.expected_token:
+                raise AssertionError("synthetic token mismatch")
+            self.factory.secret_reads += 1
         self.factory.enumerations += 1
         return [
             ConversationRef(self.source_id, self.account_id, ident, "同名合成群", "group")
@@ -126,16 +135,23 @@ class SyntheticAdapter:
         if self.cancelled:
             raise FetchCancelled("Synthetic cancellation")
         messages = self.factory.messages(conversation_id)
-        return FetchPage(messages, None, CompletenessEvidence(
-            status=self.factory.completeness,
-            reason="synthetic_fixture",
-            requested_start_ms=start_ms, requested_end_ms=end_ms,
-            observed_start_ms=START_MS if messages else None,
-            observed_end_ms=END_MS - 1 if messages else None,
-            fetched_count=len(messages), accepted_count=len(messages),
-            duplicate_count=0, unknown_time_count=0, missing_id_count=0,
-            parse_error_count=0, termination="synthetic_fixture_exhausted",
-        ))
+        evidence = {
+            "status": self.factory.completeness,
+            "reason": "synthetic_fixture",
+            "requested_start_ms": start_ms,
+            "requested_end_ms": end_ms,
+            "observed_start_ms": START_MS if messages else None,
+            "observed_end_ms": END_MS - 1 if messages else None,
+            "fetched_count": len(messages),
+            "accepted_count": len(messages),
+            "duplicate_count": 0,
+            "unknown_time_count": 0,
+            "missing_id_count": 0,
+            "parse_error_count": 0,
+            "termination": "synthetic_fixture_exhausted",
+        }
+        evidence.update(self.factory.evidence_changes)
+        return FetchPage(messages, None, CompletenessEvidence(**evidence))
 
     def cancel(self):
         self.cancelled = True
@@ -155,6 +171,8 @@ class SyntheticFactory:
         self.failure = None
         self.on_read = None
         self.completeness = "source_range_verified"
+        self.evidence_changes = {}
+        self.evidence_class = "synthetic"
         self.require_secret = False
         self.secret_reads = 0
         self.secret_grant = None
@@ -272,6 +290,7 @@ class Harness:
         self.factory.secret_store = self.store
         self.factory.expected_token = self.token
         self.accounts = {"qq": "fixture-account", "wechat": "fixture-account"}
+        self.disclosure_confirmations = {}
         self.stack = ExitStack()
         self.settings = Settings(
             host="127.0.0.1", timezone="Asia/Shanghai", data_dir=tmp_path,
@@ -283,7 +302,11 @@ class Harness:
         monkeypatch.setattr(socket.socket, "connect", deny_network)
         monkeypatch.setattr(socket, "create_connection", deny_network)
 
-    def start(self):
+    def start(
+        self, *, run_jobs=False, frontend_dist=None, setup_options=None,
+        import_request_max_bytes=91_000_000,
+        session_recovery_ttl_seconds=7 * 24 * 60 * 60,
+    ):
         # Deliberately deferred: missing P0 modules fail each relevant test,
         # while pytest can still collect the complete RED acceptance suite.
         from chat_to_howto.db import Database
@@ -295,8 +318,11 @@ class Harness:
             settings=self.settings, database=self.database,
             adapter_factory=self.factory, secret_store=self.store, clock=self.clock,
             output_roots={"fixture-root": self.output_root, "fixture-root-2": self.second_output_root},
-            source_root=self.workspace, origin=ORIGIN, run_jobs=False,
+            source_root=self.workspace, origin=ORIGIN, run_jobs=run_jobs,
             session_ttl_seconds=1800, selection_ttl_seconds=300, consent_ttl_seconds=300,
+            session_recovery_ttl_seconds=session_recovery_ttl_seconds,
+            import_request_max_bytes=import_request_max_bytes,
+            frontend_dist=frontend_dist, setup_options=setup_options,
         )
         self.client = self.stack.enter_context(TestClient(self.app, base_url=ORIGIN, raise_server_exceptions=False))
         self.csrf = None
@@ -362,17 +388,28 @@ class Harness:
             "selection": selection, "timezone": timezone_name,
         })
         assert response.status_code == 200
-        assert set(response.json()) <= {"consent_challenge", "disclosure", "expires_at", "scope_fingerprint"}
+        data = response.json()
+        assert set(data) <= {"consent_challenge", "disclosure", "expires_at", "scope_fingerprint"}
         assert "configuration_nonce" not in response.text
         assert "secret_reference" not in response.text
         assert str(self.output_root) not in response.text
         assert not any(identifier in response.text for identifier in self.factory.conversation_ids)
-        return response.json()["consent_challenge"]
+        challenge = data["consent_challenge"]
+        self.disclosure_confirmations[challenge] = {
+            "disclosure_revision": data["disclosure"]["revision"],
+            "disclosure_hash": data["disclosure"]["hash"],
+        }
+        return challenge
+
+    def confirmation(self, challenge):
+        return dict(self.disclosure_confirmations.get(challenge, {}))
 
     def submit(self, selection, challenge=None, **changes):
+        challenge = challenge or self.challenge(selection)
         body = {
             "selection": selection, "timezone": "Asia/Shanghai",
-            "consent_challenge": challenge or self.challenge(selection), "confirmed": True,
+            "consent_challenge": challenge, "confirmed": True,
+            **self.confirmation(challenge),
             **changes,
         }
         return self.request("POST", f"/api/sources/{selection['source_id']}/verification-jobs", json=body)
@@ -382,15 +419,24 @@ class Harness:
             "operation": operation, "account_id": self.accounts[source_id],
         })
         assert response.status_code == 200
-        assert set(response.json()) <= {"consent_challenge", "disclosure", "expires_at"}
+        data = response.json()
+        assert set(data) <= {"consent_challenge", "disclosure", "expires_at"}
         assert "secret_reference" not in response.text
-        return response.json()["consent_challenge"]
+        challenge = data["consent_challenge"]
+        self.disclosure_confirmations[challenge] = {
+            "disclosure_revision": data["disclosure"]["revision"],
+            "disclosure_hash": data["disclosure"]["hash"],
+        }
+        return challenge
 
-    def secret_operation(self, operation, *, challenge=None, confirmed=True, source_id="qq", value=None):
+    def secret_operation(self, operation, *, challenge=None, confirmed=True, source_id="qq", value=None, **changes):
+        challenge = challenge if challenge is not None else self.secret_challenge(operation, source_id)
         body = {
             "operation": operation, "account_id": self.accounts[source_id],
-            "consent_challenge": challenge if challenge is not None else self.secret_challenge(operation, source_id),
+            "consent_challenge": challenge,
             "confirmed": confirmed,
+            **self.confirmation(challenge),
+            **changes,
         }
         if value is not None:
             body["value"] = value
@@ -419,7 +465,7 @@ class Harness:
         assert report["account_version"] == "fixture-account-1"
         assert report["range_start"] == START and report["range_end"] == END
         assert report["timezone"] == "Asia/Shanghai"
-        assert report["evidence_class"] == "synthetic"
+        assert report["evidence_class"] in {"unknown", "synthetic", "real_device"}
         if "system_version" in report:
             assert set(report["system_version"]) <= {"system", "release", "version", "architecture"}
         return report
@@ -431,6 +477,16 @@ class Harness:
                 raise AssertionError("expected_one_private_artifact")
             artifact = files[0]
         self.privacy.allow_private_message_artifact(artifact)
+
+    def allow_single_private_artifact_if_present(self):
+        """Register a produced fixture artifact before later verdict assertions."""
+        files = [
+            path
+            for root in (self.output_root, self.second_output_root)
+            for path in root.rglob("*.jsonl")
+        ]
+        if len(files) == 1:
+            self.privacy.allow_private_message_artifact(files[0])
 
 
 def pytest_configure(config):

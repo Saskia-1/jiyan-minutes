@@ -63,6 +63,7 @@ class SourceCapabilityTests(unittest.TestCase):
             current_fingerprint=fingerprint,
             export_scope=scope,
             export_consent=consent,
+            evidence_class="real_device",
         )
 
         changed_versions = (
@@ -91,6 +92,7 @@ class SourceCapabilityTests(unittest.TestCase):
                 current_fingerprint=fingerprint.model_copy(update={"tool_version": "1.2.4"}),
                 export_scope=scope,
                 export_consent=consent,
+                evidence_class="real_device",
             )
         declined = ConsentRecord.decline(scope, expires_at=NOW + timedelta(minutes=5), now=NOW)
         with self.assertRaisesRegex(ValueError, "approved export consent"):
@@ -99,6 +101,7 @@ class SourceCapabilityTests(unittest.TestCase):
                 current_fingerprint=fingerprint,
                 export_scope=scope,
                 export_consent=declined,
+                evidence_class="real_device",
             )
 
     def test_blocked_or_unsupported_source_cannot_be_promoted_to_ready(self) -> None:
@@ -126,6 +129,7 @@ class SourceCapabilityTests(unittest.TestCase):
                         current_fingerprint=fingerprint,
                         export_scope=scope,
                         export_consent=consent,
+                        evidence_class="real_device",
                     )
 
     def test_reconfiguration_invalidates_old_consent_after_blocked_or_unsupported(self) -> None:
@@ -152,6 +156,7 @@ class SourceCapabilityTests(unittest.TestCase):
                         current_fingerprint=fingerprint,
                         export_scope=old_scope,
                         export_consent=old_consent,
+                        evidence_class="real_device",
                     )
                 new_scope, new_consent = approved_export_consent(
                     fingerprint, reconfigured.configuration_nonce
@@ -161,6 +166,7 @@ class SourceCapabilityTests(unittest.TestCase):
                     current_fingerprint=fingerprint,
                     export_scope=new_scope,
                     export_consent=new_consent,
+                    evidence_class="real_device",
                 )
                 self.assertEqual(ready.status, SourceStatus.READY)
 

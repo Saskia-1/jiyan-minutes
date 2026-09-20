@@ -7,6 +7,7 @@ import re
 from typing import Any, Protocol
 
 from chat_to_howto.domain.consent import ConsentRecord, SecretAccessScope
+from chat_to_howto.domain.sources import SourceFingerprint
 from chat_to_howto.security.secrets import SecretStore
 from chat_to_howto.sources.base import (
     CompletenessEvidence,
@@ -47,6 +48,7 @@ class TraceMemoAdapter:
         token_access: SecretAccessScope,
         token_consent: ConsentRecord,
         account_id: str,
+        fingerprint: SourceFingerprint,
     ) -> None:
         self._transport = transport
         self._store = secret_store
@@ -55,6 +57,10 @@ class TraceMemoAdapter:
         self._account = account_id
         self._cancelled = False
         self._conversation_ids: frozenset[str] = frozenset()
+        if not isinstance(fingerprint, SourceFingerprint):
+            raise TypeError("fingerprint must be a SourceFingerprint")
+        self.fingerprint = fingerprint
+        self.evidence_class = "real_device"
 
     def health(self) -> SourceHealth:
         data = self._get("/api/v1/health")

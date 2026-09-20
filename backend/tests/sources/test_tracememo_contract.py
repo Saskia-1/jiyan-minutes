@@ -16,6 +16,7 @@ from chat_to_howto.domain.consent import (
     SecretAccessScope,
     SecretOperation,
 )
+from chat_to_howto.domain.sources import SourceFingerprint
 from chat_to_howto.security.secrets import InMemorySecretStore
 from chat_to_howto.sources.base import (
     FetchCancelled,
@@ -79,6 +80,11 @@ def adapter(responses: list[object], *, store=None):
         token_access=token_access(SecretOperation.GET),
         token_consent=grant(token_access(SecretOperation.GET)),
         account_id="account-1",
+        fingerprint=SourceFingerprint(
+            client_version="wechat-4.1.13",
+            tool_version="2.3.0",
+            account_version="account-version",
+        ),
     )
     return source, transport
 

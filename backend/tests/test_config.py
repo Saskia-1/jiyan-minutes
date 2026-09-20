@@ -26,6 +26,8 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.qce_base_url, "http://127.0.0.1:40653")
         self.assertEqual(settings.tracememo_base_url, "http://127.0.0.1:6131")
         self.assertEqual(settings.llm_provider, "unconfigured")
+        self.assertEqual(settings.llm_model, "deepseek-v4-flash")
+        self.assertEqual(settings.llm_daily_request_limit, 100)
 
     def test_load_reads_only_declared_configuration_names(self) -> None:
         """An unrelated environment value must not influence typed configuration."""
@@ -39,6 +41,8 @@ class SettingsTests(unittest.TestCase):
                 "QCE_BASE_URL": "http://127.0.0.1:4567",
                 "TRACEMEMO_BASE_URL": "http://127.0.0.1:6789",
                 "LLM_PROVIDER": "unconfigured",
+                "DEEPSEEK_MODEL": "deepseek-v4-pro",
+                "LLM_DAILY_REQUEST_LIMIT": "12",
                 "UNRELATED_SECRET": "DO_NOT_READ_OR_REPORT",
             },
             clear=True,
@@ -50,6 +54,8 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.export_root, Path("/private/tmp/exports"))
         self.assertEqual(settings.qce_base_url, "http://127.0.0.1:4567")
         self.assertEqual(settings.tracememo_base_url, "http://127.0.0.1:6789")
+        self.assertEqual(settings.llm_model, "deepseek-v4-pro")
+        self.assertEqual(settings.llm_daily_request_limit, 12)
         self.assertNotIn("DO_NOT_READ_OR_REPORT", repr(settings))
 
     def test_load_rejects_a_non_loopback_bind_host(self) -> None:
@@ -57,3 +63,10 @@ class SettingsTests(unittest.TestCase):
         with patch.dict(os.environ, {"APP_HOST": "0.0.0.0"}, clear=True):
             with self.assertRaisesRegex(ValueError, "APP_HOST must be 127.0.0.1"):
                 Settings.load()
+
+    def test_load_rejects_invalid_daily_request_limits(self) -> None:
+        for value in ("0", "10001", "1.5", "-1", "yes"):
+            with self.subTest(value=value):
+                with patch.dict(os.environ, {"LLM_DAILY_REQUEST_LIMIT": value}, clear=True):
+                    with self.assertRaisesRegex(ValueError, "LLM_DAILY_REQUEST_LIMIT"):
+                        Settings.load()

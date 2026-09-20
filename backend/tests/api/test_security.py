@@ -9,6 +9,38 @@ import pytest
 from conftest import ORIGIN
 
 
+def test_legacy_session_migration_does_not_extend_existing_authority(tmp_path):
+    from chat_to_howto.db import Database, P0_SCHEMA_VERSION
+
+    path = tmp_path / "legacy-session.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE sessions (
+                token_hash TEXT PRIMARY KEY,
+                csrf_hash TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+            INSERT INTO sessions(token_hash, csrf_hash, expires_at)
+            VALUES ('token-digest', 'csrf-digest', '2026-09-13T12:00:00+00:00');
+            PRAGMA user_version=2;
+            """
+        )
+
+    database = Database(path)
+    row = database.one(
+        "SELECT expires_at, recovery_expires_at FROM sessions WHERE token_hash=?",
+        ("token-digest",),
+    )
+
+    assert row == {
+        "expires_at": "2026-09-13T12:00:00+00:00",
+        "recovery_expires_at": "2026-09-13T12:00:00+00:00",
+    }
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == P0_SCHEMA_VERSION
+
+
 def test_zero_byte_database_migration_is_idempotent_and_sessions_are_hash_only(p0):
     p0.start()
     response = p0.bootstrap()
@@ -66,6 +98,39 @@ def test_local_requests_ignore_untrusted_forwarded_authority(p0):
     response = p0.request("GET", "/api/session", headers={"X-Forwarded-Host": "evil.example"})
     assert response.status_code == 200
     assert "evil.example" not in response.text
+
+
+def test_browser_gets_allow_missing_origin_but_require_session_for_business_metadata_and_never_cache(p0):
+    p0.start()
+    headers = {"Host": "127.0.0.1:8765"}
+    unauthenticated = p0.client.get("/api/sources", headers=headers)
+    assert unauthenticated.status_code == 401
+    bootstrap = p0.client.get("/api/session", headers=headers)
+    assert bootstrap.status_code == 200
+    assert bootstrap.headers["cache-control"] == "no-store"
+    p0._capture_bootstrap(bootstrap)
+    authenticated = p0.client.get("/api/sources", headers=headers)
+    assert authenticated.status_code == 200
+    assert authenticated.headers["cache-control"] == "no-store"
+    hostile = p0.client.get("/api/sources", headers={**headers, "Origin": "https://evil.example"})
+    assert hostile.status_code in (400, 403)
+
+
+def test_built_frontend_can_bootstrap_without_exposing_business_api(p0, tmp_path):
+    frontend = tmp_path / "frontend-dist"
+    frontend.mkdir()
+    (frontend / "index.html").write_text("<!doctype html><title>Chat to How-To</title>", encoding="utf-8")
+    p0.start(frontend_dist=frontend)
+
+    root = p0.client.get("/", headers={"Host": "127.0.0.1:8765"})
+    assert root.status_code == 200
+    assert "Chat to How-To" in root.text
+    assert root.headers["cache-control"] == "no-store"
+    assert p0.client.get("/api/sources", headers={"Host": "127.0.0.1:8765"}).status_code == 401
+    assert p0.client.get("/", headers={"Host": "evil.example"}).status_code == 403
+    assert p0.client.post(
+        "/", headers={"Host": "127.0.0.1:8765", "Origin": ORIGIN}
+    ).status_code == 403
 
 
 @pytest.mark.parametrize("path", [

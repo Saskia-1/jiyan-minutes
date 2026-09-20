@@ -12,6 +12,7 @@ from typing import get_args, get_type_hints
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from chat_to_howto.domain.consent import ConsentRecord, SecretAccessScope, SecretOperation
+from chat_to_howto.domain.sources import SourceFingerprint
 from chat_to_howto.security.secrets import InMemorySecretStore
 from chat_to_howto.sources.base import CompletenessEvidence, FetchCancelled, PaginationError, SourceAdapterError, UpstreamProtocolError
 from chat_to_howto.sources.qce import QceAdapter
@@ -64,6 +65,11 @@ def adapter(responses: list[dict[str, object]]) -> tuple[QceAdapter, RecordingTr
         token_access=token_access(SecretOperation.GET),
         token_consent=grant(token_access(SecretOperation.GET)),
         account_id="account-1",
+        fingerprint=SourceFingerprint(
+            client_version="qq-client",
+            tool_version="6.2.10",
+            account_version="account-version",
+        ),
     ), transport
 
 

@@ -24,6 +24,7 @@ documents/generated/
 *.tmp
 
 # Caches and third-party state
+.pnpm-store/
 __pycache__/
 *.py[cod]
 .pytest_cache/
