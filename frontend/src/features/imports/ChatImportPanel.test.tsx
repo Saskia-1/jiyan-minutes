@@ -30,6 +30,35 @@ const committed = {
 };
 const emptyRecovery = { imports: [], next_cursor: null };
 
+it("简洁导入无时间聊天默认折叠，展开排除后只整理剩余消息", async () => {
+  const rows = ["收藏歌单", "无关消息"].map((text, index) => ({
+    message_id: `message:${index}`, conversation_id: "c", timestamp: null, source_order: index + 1,
+    sender_name: "甲", sender_id: null, text, batch_id: committed.batch_id, snapshot_id: committed.snapshot_id,
+  }));
+  const api = { recoverImports: vi.fn().mockResolvedValue({ imports: [{ ...committed, analysis: { ...preview.analysis, time_start: null, time_end: null } }], next_cursor: null }),
+    searchChats: vi.fn().mockResolvedValue({ results: rows, next_cursor: null }),
+    expandTopic: vi.fn().mockRejectedValue(new Error("offline")),
+    previewGenerationContext: vi.fn().mockResolvedValue({ messages: rows, added_count: 0 }),
+    previewGeneration: vi.fn().mockRejectedValue(new Error("stop before external generation")),
+  } as unknown as LocalApiClient;
+  const user = userEvent.setup();
+  const { ChatImportPanel } = await import("./ChatImportPanel");
+  render(<ChatImportPanel compact api={api} outputRootId="" />);
+  const toggle = await screen.findByText(/展开聊天内容（2 条/);
+  expect(toggle.closest("details")).not.toHaveAttribute("open");
+  await user.click(toggle);
+  expect(screen.getByText("收藏歌单")).toBeVisible();
+  expect(screen.getAllByText("时间未知")).toHaveLength(2);
+  await user.click(screen.getAllByRole("checkbox", { name: "排除此消息" })[1]);
+  await user.type(screen.getByRole("textbox", { name: "关键词" }), "音乐");
+  await user.click(screen.getByRole("button", { name: "开始整理" }));
+  await waitFor(() => expect(api.previewGeneration).toHaveBeenCalledWith(expect.objectContaining({
+    summary_type: "ideas", include_undated: true, excluded_message_ids: ["message:1"], included_message_ids: ["message:0", "message:1"],
+  })));
+  expect(screen.getByText(/扩展暂不可用/)).toBeVisible();
+  expect(screen.getByRole("button", { name: "重新整理" })).toBeEnabled();
+});
+
 it("原始 MM-DD TXT 会将用户明确选择的年份传入预览", async () => {
   const api = {
     recoverImports: vi.fn().mockResolvedValue(emptyRecovery),

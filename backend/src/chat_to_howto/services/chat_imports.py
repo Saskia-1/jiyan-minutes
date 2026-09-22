@@ -223,6 +223,8 @@ def _conversation_id(
 
 
 def _message_type(raw: str | None, text: str | None) -> tuple[str, str]:
+    if text and re.fullmatch(r"\[(?:语音|图片|文件|聊天记录)\](?:\s*\d{2}:\d{2})?", text):
+        return "placeholder", "other"
     normalized = (raw or "").casefold()
     if normalized in {"text", "文本", "message"} or (not normalized and text is not None):
         return "text", "text"
@@ -314,9 +316,11 @@ class ChatImportAnalyzer:
             if conversation is None:
                 record_issue(row_number, "conversation_unresolved")
                 row_invalid = True
-            if sent_at is None:
+            if sent_raw is not None and sent_at is None:
                 record_issue(row_number, "timestamp_unresolved")
-                row_invalid = True
+                # Retain the original undecodable value and an unknown timestamp.
+                if not (_TIME_ONLY.fullmatch(sent_raw) and default_date is None):
+                    row_invalid = True
             if row_invalid:
                 unresolved_rows += 1
                 continue
@@ -325,6 +329,10 @@ class ChatImportAnalyzer:
             sender_id = _scalar(row, mapping.get("sender_id"))
             source_message_id = _scalar(row, mapping.get("source_message_id"))
             message_type, _bucket = _message_type(_scalar(row, mapping.get("message_type")), text)
+            if text is None and message_type in {"text", "unknown"}:
+                record_issue(row_number, "message_invalid")
+                unresolved_rows += 1
+                continue
             try:
                 message = StoredMessage.from_input(MessageInput(
                     source_id="manual",
@@ -333,7 +341,7 @@ class ChatImportAnalyzer:
                     source_message_id=source_message_id,
                     source_file_id=file_id,
                     page_slice_id=None,
-                    source_order=None if source_message_id is not None else row_number,
+                    source_order=row_number,
                     platform=platform,
                     conversation_name=conversation_name,
                     conversation_type=_scalar(row, mapping.get("conversation_type")),
@@ -352,7 +360,7 @@ class ChatImportAnalyzer:
                 continue
             existing = messages_by_id.get(message.message_id)
             if existing is not None:
-                if existing == message:
+                if existing.model_copy(update={"source_order": message.source_order}) == message:
                     duplicates += 1
                 else:
                     record_issue(row_number, "message_identity_conflict")
@@ -365,8 +373,10 @@ class ChatImportAnalyzer:
             derived_conversation = derived_conversation or derived
             sender_unknown = sender_unknown or (sender_name is None and sender_id is None)
 
-        if issues:
+        if unresolved_rows:
             warnings.append("unresolved_rows_not_imported")
+        if any(message.sent_at_utc is None for message in messages):
+            warnings.append("some_timestamps_unknown")
         if used_excel_serial:
             warnings.append("excel_serial_timestamp")
         if derived_conversation:
@@ -403,7 +413,6 @@ class ChatImportAnalyzer:
                 text=message.text[:500] if message.text is not None else None,
             )
             for message in messages[:20]
-            if message.sent_at_utc is not None
         )
         view = ImportAnalysis(
             total_count=len(rows),

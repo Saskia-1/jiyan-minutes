@@ -16,6 +16,14 @@ def _parser(**changes):
     return BackupParser(limits=limits)
 
 
+def test_undated_txt_preserves_mixed_export_headers_and_body_colons():
+    payload = "甲:\u00a0\r首条正文\r\r乙:\u00a0同一行正文\r他需要的是：\r不拆这个标题\r甲:\u00a0[图片]乙:\u00a0最后一条\r甲:\u00a0[语音] 00:02乙:\u00a0结尾\r".encode()
+    rows = _parser().rows(filename="mixed.txt", payload=payload)
+    assert [row["sender_name"] for row in rows] == ["甲", "乙", "甲", "乙", "甲", "乙"]
+    assert [row["text"] for row in rows] == ["首条正文", "同一行正文\n他需要的是：\n不拆这个标题", "[图片]", "最后一条", "[语音] 00:02", "结尾"]
+    assert all(row["sent_at"] is None for row in rows)
+
+
 def test_csv_preview_handles_utf8_bom_multiline_chinese_and_mapping() -> None:
     payload = (
         "\ufeffconversation_id,timestamp,sender,text\r\n"

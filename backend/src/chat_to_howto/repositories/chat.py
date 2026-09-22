@@ -749,6 +749,7 @@ class ChatRepository:
         scope: ExportScope,
         messages: tuple[StoredMessage, ...],
         manifest: BatchManifest,
+        allow_undated: bool = False,
     ) -> tuple[StoredMessage, ...]:
         """Recheck importer inputs without echoing message bodies in errors."""
         scope_conversations = tuple(
@@ -805,13 +806,13 @@ class ChatRepository:
                 raise ValueError("message account namespace is outside the export scope")
             if stable.conversation_id not in selected:
                 raise ValueError("message conversation was not selected")
-            if stable.sent_at_utc is None:
+            if stable.sent_at_utc is None and not (allow_undated and scope.source_id == "manual"):
                 raise ValueError("snapshot message has no precise timestamp")
-            if stable.sent_at_utc < scope.range_start or stable.sent_at_utc >= scope.range_end:
+            if stable.sent_at_utc is not None and (stable.sent_at_utc < scope.range_start or stable.sent_at_utc >= scope.range_end):
                 raise ValueError("snapshot message is outside the export range")
             normalized.append(stable)
 
-        timestamps = tuple(message.sent_at_utc for message in normalized)
+        timestamps = tuple(message.sent_at_utc for message in normalized if message.sent_at_utc is not None)
         expected_earliest = min(timestamps) if timestamps else None
         expected_latest = max(timestamps) if timestamps else None
         if (
@@ -838,6 +839,7 @@ class ChatRepository:
             scope=scope,
             messages=messages,
             manifest=manifest,
+            allow_undated=manual_import is not None,
         )
         manifest_json, manifest_sha256 = self._canonical_manifest(manifest)
         scope_fingerprint = scope.fingerprint()

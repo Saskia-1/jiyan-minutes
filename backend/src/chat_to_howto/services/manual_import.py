@@ -275,11 +275,27 @@ _TXT_MONTH_DAY_HEADER = re.compile(
     r"^(?P<sender>.+):\s*(?P<date>\d{2}-\d{2})\s+"
     r"(?P<time>\d{2}:\d{2}:\d{2})$"
 )
+_TXT_UNDATED_HEADER = re.compile(r"^(?P<sender>[^：:\n]{1,100})[：:]\s*$")
 
 
 def _parse_txt(
     text: str, limits: BackupLimits
 ) -> tuple[list[dict[str, object]], tuple[str, ...]]:
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Copied TXT exports use colon + NBSP for sender delimiters, including
+    # inline bodies and adjacent media placeholders. Match that exact delimiter,
+    # not arbitrary prose headings ending in a colon.
+    export_header = re.compile(r"(?m)^(?P<sender>[^：:\n]{1,100}):\u00a0[ \t]*")
+    first_header = export_header.match(text.lstrip("\n"))
+    if first_header:
+        speakers = {match.group("sender").strip() for match in export_header.finditer(text)}
+        pattern = re.compile(r"(?:^|(?<=\])|(?<=\] \d{2}:\d{2}))(" + "|".join(re.escape(name) for name in sorted(speakers)) + r"):\u00a0[ \t]*", re.MULTILINE)
+        headers = list(pattern.finditer(text))
+        rows = [{"sent_at": None, "sender_name": match.group(1),
+                 "text": text[match.end():headers[index + 1].start() if index + 1 < len(headers) else len(text)].strip()}
+                for index, match in enumerate(headers)]
+        _validate_text_rows(rows, limits)
+        return rows, ("sent_at", "sender_name", "text")
     lines = text.splitlines()
     nonblank = [(number, line) for number, line in enumerate(lines, 1) if line.strip()]
     if not nonblank:
@@ -302,6 +318,7 @@ def _parse_txt(
     # This prevents a header-like line inside an existing documented TXT body
     # from changing the parser used for the whole file.
     month_day_dialect = _TXT_MONTH_DAY_HEADER.fullmatch(nonblank[0][1].strip()) is not None
+    undated_dialect = _TXT_UNDATED_HEADER.fullmatch(nonblank[0][1].strip()) is not None
 
     rows: list[dict[str, object]] = []
     current: dict[str, object] | None = None
@@ -318,6 +335,7 @@ def _parse_txt(
 
     for line in lines:
         match = (
+            _TXT_UNDATED_HEADER.fullmatch(line.strip()) if undated_dialect else
             _TXT_MONTH_DAY_HEADER.fullmatch(line.strip())
             if month_day_dialect
             else _TXT_BLOCK_HEADER.fullmatch(line.strip())
@@ -325,7 +343,7 @@ def _parse_txt(
         if match:
             finish()
             current = {
-                "sent_at": f'{match.group("date")} {match.group("time")}',
+                "sent_at": None if undated_dialect else f'{match.group("date")} {match.group("time")}',
                 "sender_name": match.group("sender").strip(),
             }
         elif current is not None:

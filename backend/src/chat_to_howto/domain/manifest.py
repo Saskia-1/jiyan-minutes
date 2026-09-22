@@ -130,7 +130,9 @@ class BatchManifest(_FrozenModel):
             raise ValueError("saved timestamp bounds must both be present or absent")
         if self.saved_count == 0 and self.earliest_saved_at_utc is not None:
             raise ValueError("empty artifacts cannot have saved timestamp bounds")
-        if self.saved_count > 0 and self.earliest_saved_at_utc is None:
+        if self.saved_count > 0 and self.earliest_saved_at_utc is None and not (
+            self.source_type == "manual" and self.unknown_time_count == self.saved_count
+        ):
             raise ValueError("nonempty artifacts require saved timestamp bounds")
         if self.earliest_saved_at_utc and self.latest_saved_at_utc:
             if self.earliest_saved_at_utc > self.latest_saved_at_utc:

@@ -6,6 +6,7 @@ import type {
 import { ChatSearchPanel } from "../search/ChatSearchPanel";
 import { DeletionControl } from "../data/DeletionControl";
 import { DocumentLibrary } from "../documents/DocumentLibrary";
+import { ImportedChatWorkspace } from "./ImportedChatWorkspace";
 
 const mappingFields = [
   ["conversation_id", "会话 ID"], ["conversation_name", "会话名称"],
@@ -44,7 +45,7 @@ function importedConversations(value: ImportCommit): Conversation[] {
   }));
 }
 
-export function ChatImportPanel({ api, outputRootId }: { api: LocalApiClient; outputRootId: string }) {
+export function ChatImportPanel({ api, outputRootId, compact = false }: { api: LocalApiClient; outputRootId: string; compact?: boolean }) {
   const [origin, setOrigin] = useState<"imported_file" | "paste">("imported_file");
   const [platform, setPlatform] = useState<ImportPlatformHint>("generic");
   const [file, setFile] = useState<File | null>(null);
@@ -123,7 +124,7 @@ export function ChatImportPanel({ api, outputRootId }: { api: LocalApiClient; ou
         mapping,
         default_date: defaultDate || null,
         default_year: defaultYear ? Number(defaultYear) : null,
-        default_conversation_name: conversationName.trim() || null,
+        default_conversation_name: conversationName.trim() || (compact ? file?.name.replace(/\.[^.]+$/, "") || "粘贴的聊天" : null),
       };
       const value = origin === "paste"
         ? await api.previewImport({ origin, platform_hint: platform, pasted_text: pastedText, options })
@@ -157,9 +158,11 @@ export function ChatImportPanel({ api, outputRootId }: { api: LocalApiClient; ou
     setMappingDirty(true); setConfirmed(false);
   }
 
-  return <section className="panel import-panel" aria-label="导入聊天记录">
-    <h2>导入聊天记录</h2>
-    <p>支持 TXT、JSON、JSONL、CSV、XLSX、单文件 ZIP 和直接粘贴。先在内存中解析并预览；只有明确确认后才写入本地索引。</p>
+  const OptionsContainer = compact ? "details" : "div";
+  const HistoryContainer = compact ? "details" : "section";
+  const importControls = <>
+    {!compact && <h2>导入聊天记录</h2>}
+    <p className="muted">支持 TXT、JSON、JSONL、CSV、XLSX、单文件 ZIP，也可以直接粘贴聊天。</p>
     <div className="import-origin" role="radiogroup" aria-label="导入方式">
       <label className="check"><input type="radio" name="import-origin" checked={origin === "imported_file"} disabled={importLocked}
         onChange={() => { setOrigin("imported_file"); invalidatePreview(true); }} />导入文件</label>
@@ -171,7 +174,7 @@ export function ChatImportPanel({ api, outputRootId }: { api: LocalApiClient; ou
         onChange={event => { setFile(event.target.files?.[0] || null); invalidatePreview(true); }} />
     </label> : <label>聊天文本<textarea aria-label="聊天文本" value={pastedText} disabled={importLocked}
       onChange={event => { setPastedText(event.target.value); invalidatePreview(); }} /></label>}
-    <div className="fields">
+    <OptionsContainer>{compact && <summary>导入选项</summary>}<div className="fields">
       <label>来源提示<select value={platform} disabled={importLocked} onChange={event => { setPlatform(event.target.value as ImportPlatformHint); invalidatePreview(); }}>
         <option value="generic">通用导出</option><option value="qq">QQ 导出</option><option value="wechat">微信导出</option>
       </select></label>
@@ -185,7 +188,7 @@ export function ChatImportPanel({ api, outputRootId }: { api: LocalApiClient; ou
         onChange={event => { setDefaultYear(event.target.value); invalidatePreview(); }} /></label>
       <label>默认会话名称<input aria-label="默认会话名称" value={conversationName} maxLength={512} disabled={importLocked}
         onChange={event => { setConversationName(event.target.value); invalidatePreview(); }} /></label>
-    </div>
+    </div></OptionsContainer>
     <button type="button" disabled={importLocked || (origin === "imported_file" ? !file : !pastedText.trim())}
       onClick={() => void createPreview()}>{mappingDirty ? "更新导入预览" : "生成导入预览"}</button>
     {error && <p role="alert">{error}</p>}
@@ -194,15 +197,15 @@ export function ChatImportPanel({ api, outputRootId }: { api: LocalApiClient; ou
       <p role="status">共 {preview.analysis.total_count} 行 · 可导入 {preview.analysis.parsed_count} 条 · 未解析 {preview.analysis.unresolved_count} 行 · 重复 {preview.analysis.duplicate_count} 条 · 发送者 {preview.analysis.sender_count} 个</p>
       <p>格式：{preview.source.format.toUpperCase()} · 大小：{preview.source.byte_size} 字节 · 时间范围：{preview.analysis.time_start || "未知"} 至 {preview.analysis.time_end || "未知"}</p>
       <p>消息类型：文本 {preview.analysis.message_types.text} · 图片 {preview.analysis.message_types.image} · 文件 {preview.analysis.message_types.file} · 其他 {preview.analysis.message_types.other} · 未知 {preview.analysis.message_types.unknown}</p>
-      {!!preview.source.columns.length && <fieldset><legend>字段映射</legend><div className="fields">{mappingFields.map(([target, label]) =>
+      {!!preview.source.columns.length && <OptionsContainer>{compact && <summary>调整字段映射</summary>}<fieldset><legend>字段映射</legend><div className="fields">{mappingFields.map(([target, label]) =>
         <label key={target}>{label}<select value={mapping[target] || ""} disabled={importLocked}
           onChange={event => changeMapping(target, event.target.value)}><option value="">不映射</option>
-          {preview.source.columns.map(column => <option value={column} key={column}>{column}</option>)}</select></label>)}</div></fieldset>}
+          {preview.source.columns.map(column => <option value={column} key={column}>{column}</option>)}</select></label>)}</div></fieldset></OptionsContainer>}
       {mappingDirty && <p className="warning">字段映射已变化，请更新预览后再确认。</p>}
       {!!preview.analysis.conversations.length && <p>会话：{preview.analysis.conversations.map(item => `${item.conversation_name || "未命名"}（${item.message_count} 条）`).join("、")}</p>}
-      {!!preview.analysis.samples.length && <section aria-label="消息样例"><h3>消息样例</h3><ol>{preview.analysis.samples.map(item =>
-        <li key={item.row_number}><strong>{item.sender_name || "未知发送者"}</strong> · <time dateTime={item.timestamp}>{item.timestamp}</time><p>{item.text ?? "[非文本消息]"}</p></li>)}</ol></section>}
-      {!!preview.analysis.warnings.length && <div className="warning"><strong>提醒</strong><ul>{preview.analysis.warnings.map(item => <li key={item}><code>{item}</code></li>)}</ul></div>}
+      {!!preview.analysis.samples.length && <HistoryContainer aria-label="消息样例">{compact ? <summary>查看消息样例</summary> : <h3>消息样例</h3>}<ol>{preview.analysis.samples.map(item =>
+        <li key={item.row_number}><strong>{item.sender_name || "未知发送者"}</strong> · <time dateTime={item.timestamp || undefined}>{item.timestamp || "时间未知"}</time><p>{item.text ?? "[非文本消息]"}</p></li>)}</ol></HistoryContainer>}
+      {!!preview.analysis.warnings.length && <OptionsContainer>{compact && <summary>导入说明</summary>}<div className="warning"><strong>提醒</strong><ul>{preview.analysis.warnings.map(item => <li key={item}><code>{item}</code></li>)}</ul></div></OptionsContainer>}
       {!!preview.analysis.issues.length && <div className="warning"><strong>未解析行</strong><ul>{preview.analysis.issues.map((item, index) =>
         <li key={`${item.row_number}-${item.code}-${index}`}>第 {item.row_number} 行：<code>{item.code}</code></li>)}</ul></div>}
       <label className="check"><input type="checkbox" checked={confirmed} disabled={importLocked || mappingDirty || !preview.ready_to_commit}
@@ -210,11 +213,12 @@ export function ChatImportPanel({ api, outputRootId }: { api: LocalApiClient; ou
       <button type="button" disabled={importLocked || mappingDirty || !preview.ready_to_commit || !confirmed}
         onClick={() => void commit()}>确认导入本地索引</button>
     </section>}
-    <section aria-label="已导入批次">
+    <HistoryContainer aria-label="已导入批次">
+      {compact && <summary>已导入的聊天</summary>}
       <h3>已导入批次</h3>
       {!imports.length && !historyBusy && <p>当前会话还没有已导入批次。</p>}
       {imports.map((item, index) => <section key={item.import_id} aria-label={`已导入批次 ${index + 1}`}>
-        <p>{item.conversations.map(value => value.display_name || "未命名会话").join("、")} · {item.range_start} 至 {item.range_end}</p>
+        <p>{item.conversations.map(value => value.display_name || "未命名会话").join("、")}{!compact && ` · ${item.range_start} 至 ${item.range_end}`}</p>
         <button type="button" disabled={importLocked} onClick={() => setCommitted(item)}>
           {committed?.import_id === item.import_id ? "当前已打开" : "打开搜索与整理"}
         </button>
@@ -226,7 +230,12 @@ export function ChatImportPanel({ api, outputRootId }: { api: LocalApiClient; ou
         onClick={() => void loadMoreImports()}>加载更早的导入</button>}
       {historyBusy && <p role="status">正在读取已导入批次…</p>}
       {historyError && <p role="alert">{historyError}</p>}
-    </section>
+    </HistoryContainer>
+  </>;
+  if (compact) return <ImportedChatWorkspace key={committed?.import_id || "empty"} api={api} committed={committed}
+    sourceControls={importControls} outputRootId={outputRootId} importBusy={busy} onScopeLockChange={setGenerationScopeLocked} />;
+  return <section className="panel import-panel" aria-label="导入聊天记录">
+    {importControls}
     {committed && <>
       <p role="status">导入完成：{conversations.length} 个会话已进入本地索引。</p>
       <ChatSearchPanel api={api} sourceId="manual" account={committed.account_id} conversations={conversations}

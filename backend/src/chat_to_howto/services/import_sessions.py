@@ -342,6 +342,7 @@ class ChatImportService:
                     )
                 ),
                 warnings=analysis.warnings,
+                analysis=analysis,
             ))
         return ImportRecoveryPage(imports=tuple(imports), next_cursor=next_cursor)
 
@@ -350,10 +351,11 @@ class ChatImportService:
     ) -> ImportCommitView:
         messages = analyzed.messages
         timestamps = tuple(message.sent_at_utc for message in messages if message.sent_at_utc)
-        range_start = min(timestamps)
+        # These are selection bounds, never substitute message timestamps.
+        range_start = min(timestamps) if timestamps else datetime.min.replace(tzinfo=timezone.utc)
         # The browser scope editor has whole-second precision. Use an exclusive
         # boundary it can round-trip without dropping the latest imported row.
-        range_end = max(timestamps) + timedelta(seconds=1)
+        range_end = max(timestamps) + timedelta(seconds=1) if timestamps else datetime.max.replace(tzinfo=timezone.utc)
         by_conversation, _metadata_conflict = aggregate_conversation_metadata(messages)
         conversations = tuple(
             ExportConversation(
@@ -430,6 +432,7 @@ class ChatImportService:
                 for handle, conversation in zip(raw_handles, conversations, strict=True)
             ),
             warnings=analyzed.view.warnings,
+            analysis=analyzed.view,
         )
 
 
@@ -440,6 +443,7 @@ def _manual_manifest(
     jsonl = b"".join(message.model_dump_json().encode() + b"\n" for message in messages)
     text = b"\n".join((message.text or "").encode() for message in messages)
     evidence = []
+    timestamps = [message.sent_at_utc for message in messages if message.sent_at_utc is not None]
     for conversation in scope.conversations:
         count = sum(message.conversation_id == conversation.conversation_id for message in messages)
         evidence.append(ConversationEvidenceManifest(
@@ -449,7 +453,7 @@ def _manual_manifest(
             fetched_count=None,
             accepted_count=count,
             duplicate_count=None,
-            unknown_time_count=0,
+            unknown_time_count=sum(message.sent_at_utc is None for message in messages if message.conversation_id == conversation.conversation_id),
             parse_error_count=None,
             warnings=analyzed.view.warnings,
             termination="user_supplied_input_exhausted",
@@ -471,16 +475,16 @@ def _manual_manifest(
         ) for item in scope.conversations),
         requested_start_utc=scope.range_start,
         requested_end_utc=scope.range_end,
-        observed_start_utc=scope.range_start,
-        observed_end_utc=max(message.sent_at_utc for message in messages),
+        observed_start_utc=min(timestamps) if timestamps else None,
+        observed_end_utc=max(timestamps) if timestamps else None,
         display_timezone=scope.display_timezone,
         fetched_count=analyzed.view.total_count,
         saved_count=len(messages),
         duplicate_count=analyzed.view.duplicate_count,
-        unknown_time_count=0,
+        unknown_time_count=len(messages) - len(timestamps),
         parse_error_count=analyzed.view.unresolved_count,
-        earliest_saved_at_utc=min(message.sent_at_utc for message in messages),
-        latest_saved_at_utc=max(message.sent_at_utc for message in messages),
+        earliest_saved_at_utc=min(timestamps) if timestamps else None,
+        latest_saved_at_utc=max(timestamps) if timestamps else None,
         completeness="unknown",
         completeness_reason="manual_user_supplied_import",
         limitations=("source_completeness_not_verified",),

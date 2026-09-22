@@ -110,7 +110,7 @@ class ImportSample(BaseModel):
     row_number: int = Field(ge=1)
     conversation_name: str | None
     sender_name: str | None
-    timestamp: datetime
+    timestamp: datetime | None
     message_type: str
     text: str | None = Field(default=None, max_length=500, repr=False)
 
@@ -203,6 +203,7 @@ class ImportCommitView(BaseModel):
     display_timezone: str = Field(min_length=1, max_length=128)
     conversations: tuple[ImportConversationHandle, ...]
     warnings: tuple[str, ...]
+    analysis: ImportAnalysis | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class ImportRecoveryPage(BaseModel):
