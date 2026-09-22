@@ -150,6 +150,45 @@ it("可从搜索结果排除消息，并把冻结后的排除范围用于生成�
   ]);
 });
 
+it("聊天总结扩词后合并去重按时间排序，并仅将召回且未排除的消息交给生成", async () => {
+  const { ChatSearchPanel } = await import("./ChatSearchPanel");
+  const early = { ...firstPage.results[0], text: "秋招求职安排", timestamp: "2026-09-01T00:00:01Z" };
+  const late = { ...firstPage.results[0], message_id: `message:v1:${"d".repeat(64)}`,
+    text: "面试简历", timestamp: "2026-09-01T00:00:02Z" };
+  const context = { ...early, message_id: `message:v1:${"e".repeat(64)}`, text: "还需要准备作品集", timestamp: "2026-09-01T00:00:01.500Z" };
+  const client = api({
+    expandTopic: vi.fn().mockResolvedValue({ topic: "就业", terms: ["就业", "求职", "面试"], degraded: false }),
+    searchChats: vi.fn().mockImplementation(async (request: { query: string }) => ({
+      results: request.query === "就业" ? [late] : request.query === "求职" ? [early, late] : [late],
+      next_cursor: null,
+    })),
+    previewGenerationContext: vi.fn().mockResolvedValue({ messages: [early, context, late], added_count: 1 }),
+  });
+  const user = userEvent.setup();
+  render(<ChatSearchPanel {...props} sourceId="manual" api={client} hideExport />);
+
+  await user.click(screen.getByRole("checkbox", { name: "选择 合成会话 A" }));
+  await user.selectOptions(screen.getByRole("combobox", { name: "检索方式" }), "topic");
+  await user.type(screen.getByRole("textbox", { name: "主题" }), "就业");
+  await user.click(screen.getByRole("button", { name: "扩展相关关键词" }));
+  expect(await screen.findByText(/就业、求职、面试/)).toBeVisible();
+  await user.click(screen.getByRole("button", { name: "搜索相关消息" }));
+  const items = await within(screen.getByRole("region", { name: "搜索结果" })).findAllByRole("listitem");
+  expect(items).toHaveLength(3);
+  expect(items[0]).toHaveTextContent("秋招求职安排");
+  expect(items[1]).toHaveTextContent("补充上下文");
+  expect(items[2]).toHaveTextContent("面试简历");
+  await user.click(within(items[2]).getByRole("checkbox", { name: /不用于 AI 生成/ }));
+  await user.selectOptions(screen.getByRole("combobox", { name: "你希望从这些聊天中总结什么？" }), "ideas");
+  await user.click(screen.getByRole("button", { name: "预览 AI 外发" }));
+  await waitFor(() => expect(client.previewGeneration).toHaveBeenCalledTimes(1));
+  expect((client.previewGeneration as any).mock.calls[0][0]).toMatchObject({
+    summary_type: "ideas", topic: "就业", mode: "complete",
+    included_message_ids: [early.message_id, context.message_id, late.message_id],
+    excluded_message_ids: [late.message_id],
+  });
+});
+
 it("重新导出产生新快照时清除旧搜索结果和排除项", async () => {
   const { ChatSearchPanel } = await import("./ChatSearchPanel");
   const replacementJob = { ...job, job_id: "job:p1-replacement", batch_id: "batch:p1-replacement",

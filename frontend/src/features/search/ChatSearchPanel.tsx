@@ -3,6 +3,7 @@ import type { LocalApiClient } from "../../api/client";
 import type { ChatSearchRequest, ChatSearchResult, ChatSourceId, Conversation, ExportJob } from "../../types";
 import { GenerationPanel } from "../generation/GenerationPanel";
 import { DeletionControl } from "../data/DeletionControl";
+import { recallTopicMessages } from "./topicRecall";
 
 const TERMINAL = new Set(["complete", "partial", "failed", "cancelled"]);
 const MAX_EXCLUDED_MESSAGES = 2_000;
@@ -66,7 +67,7 @@ function localInput(instant: string, timezone: string) {
   const parts = wallTimeParts(parsed, timezone);
   return parts ? wallTimeValue(parts) : "";
 }
-function utcInput(value: string, timezone: string) {
+export function utcInput(value: string, timezone: string) {
   const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value);
   if (!match) return "";
   const desired: WallTimeParts = {
@@ -121,9 +122,15 @@ export function ChatSearchPanel(props: Props) {
   const [exportBusy, setExportBusy] = useState(false);
   const [exportError, setExportError] = useState("");
   const [query, setQuery] = useState("");
+  const [retrievalMode, setRetrievalMode] = useState<"direct" | "topic">("direct");
+  const [summaryTopic, setSummaryTopic] = useState("");
+  const [summaryTerms, setSummaryTerms] = useState<string[]>([]);
+  const [summaryDegraded, setSummaryDegraded] = useState(false);
+  const [expansionBusy, setExpansionBusy] = useState(false);
   const [searchStart, setSearchStart] = useState(() => localInput(props.rangeStart, props.timezone));
   const [searchEnd, setSearchEnd] = useState(() => localInput(props.rangeEnd, props.timezone));
   const [results, setResults] = useState<ChatSearchResult[]>([]);
+  const [contextMessageIds, setContextMessageIds] = useState<string[]>([]);
   const [excludedMessageIds, setExcludedMessageIds] = useState<string[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [searchBusy, setSearchBusy] = useState(false);
@@ -137,7 +144,7 @@ export function ChatSearchPanel(props: Props) {
     props.onGenerationScopeLockChange?.(locked);
   }, [props.onGenerationScopeLockChange]);
 
-  useEffect(() => () => { alive.current = false; }, []);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   useEffect(() => {
     const available = new Set(props.conversations.map(item => item.conversation_selection_id));
     setSelected(current => current.filter(item => available.has(item)));
@@ -155,6 +162,18 @@ export function ChatSearchPanel(props: Props) {
       ? current.filter(item => item !== handle)
       : current.length >= MAX_SELECTED_CONVERSATIONS ? current : [...current, handle]);
     setConfirmed(false); setResults([]); setExcludedMessageIds([]); setCursor(null); setSearched(false); setSearchError("");
+  }
+
+  async function expandSummaryTopic() {
+    const topic = summaryTopic.trim();
+    if (!topic || expansionBusy || searchBusy || props.disabled || generationScopeLocked) return;
+    setExpansionBusy(true); setSearchError(""); setResults([]); setExcludedMessageIds([]); setSearched(false);
+    try {
+      const expanded = await props.api.expandTopic(topic);
+      if (alive.current) { setSummaryTerms(expanded.terms); setSummaryDegraded(expanded.degraded); }
+    } catch {
+      if (alive.current) { setSummaryTerms([topic]); setSummaryDegraded(true); }
+    } finally { if (alive.current) setExpansionBusy(false); }
   }
 
   function toggleExcluded(messageId: string) {
@@ -216,7 +235,7 @@ export function ChatSearchPanel(props: Props) {
   async function search(searchRequest: ChatSearchRequest | null = request(null), append = false) {
     if (!searchRequest || searchBusy || props.disabled || generationScopeLocked) return;
     lastSearch.current = searchRequest; setSearchBusy(true); setSearchError("");
-    if (!append) { setResults([]); setExcludedMessageIds([]); setCursor(null); setSearched(false); }
+    if (!append) { setResults([]); setContextMessageIds([]); setExcludedMessageIds([]); setCursor(null); setSearched(false); }
     try {
       const page = await props.api.searchChats(searchRequest);
       if (!alive.current) return;
@@ -227,6 +246,31 @@ export function ChatSearchPanel(props: Props) {
       setCursor(page.next_cursor); setSearched(true);
     } catch { if (alive.current) setSearchError("搜索失败；范围保持不变，可重试。"); }
     finally { if (alive.current) setSearchBusy(false); }
+  }
+
+  async function searchSummary() {
+    const base = request(null);
+    if (!base || !summaryTerms.length || searchBusy || expansionBusy || props.disabled || generationScopeLocked) return;
+    setSearchBusy(true); setSearchError(""); setResults([]); setContextMessageIds([]); setExcludedMessageIds([]); setCursor(null); setSearched(false);
+    try {
+      const recalled = await recallTopicMessages(props.api, base, summaryTerms);
+      if (!recalled.length) { if (alive.current) setSearched(true); return; }
+      if (new Set(recalled.map(item => item.snapshot_id)).size !== 1) throw new Error("multiple_snapshots");
+      const context = await props.api.previewGenerationContext({
+        source_id: base.source_id, account_id: base.account_id,
+        conversation_selection_ids: base.conversation_selection_ids,
+        snapshot_id: recalled[0].snapshot_id, start_time: base.start_time, end_time: base.end_time,
+        topic: summaryTopic.trim(), mode: "complete", summary_type: "mixed",
+        included_message_ids: recalled.map(item => item.message_id), excluded_message_ids: [],
+      });
+      if (alive.current) {
+        const hits = new Set(recalled.map(item => item.message_id));
+        setResults(context.messages); setContextMessageIds(context.messages.filter(item => !hits.has(item.message_id)).map(item => item.message_id));
+        setSearched(true);
+      }
+    } catch {
+      if (alive.current) setSearchError("相关消息搜索失败或结果过多；请缩小时间范围后重试。");
+    } finally { if (alive.current) setSearchBusy(false); }
   }
 
   const invalidRange = !utcInput(searchStart, props.timezone) || !utcInput(searchEnd, props.timezone) ||
@@ -273,19 +317,33 @@ export function ChatSearchPanel(props: Props) {
 
     <div className="search-divider" />
     <h3>搜索本地聊天</h3>
-    <label>搜索聊天内容<input type="search" value={query} maxLength={512} disabled={props.disabled || searchBusy || generationScopeLocked} onChange={event => { setQuery(event.target.value); setSearched(false); setSearchError(""); }} /></label>
+    <label>检索方式<select value={retrievalMode} disabled={props.disabled || searchBusy || expansionBusy || generationScopeLocked}
+      onChange={event => { setRetrievalMode(event.target.value as "direct" | "topic"); setResults([]); setContextMessageIds([]); setExcludedMessageIds([]); setCursor(null); setSearched(false); setSearchError(""); }}>
+      <option value="direct">直接搜索</option><option value="topic">主题相关检索（扩展关键词）</option>
+    </select></label>
+    {retrievalMode === "topic" ? <>
+      <label>主题<input type="text" value={summaryTopic} maxLength={512} disabled={props.disabled || searchBusy || expansionBusy || generationScopeLocked}
+        onChange={event => { setSummaryTopic(event.target.value); setSummaryTerms([]); setResults([]); setExcludedMessageIds([]); setSearched(false); setSearchError(""); }} /></label>
+      <button type="button" disabled={!summaryTopic.trim() || props.disabled || searchBusy || expansionBusy || generationScopeLocked}
+        onClick={() => void expandSummaryTopic()}>{expansionBusy ? "正在扩展…" : "扩展相关关键词"}</button>
+      <p>仅将主题词发送给当前 AI Provider 以寻找检索词；扩展词不是聊天事实。</p>
+      {!!summaryTerms.length && <p>检索词：{summaryTerms.join("、")}{summaryDegraded ? "（扩展失败，已退回原词）" : ""}</p>}
+    </> : <label>搜索聊天内容<input type="search" value={query} maxLength={512} disabled={props.disabled || searchBusy || generationScopeLocked} onChange={event => { setQuery(event.target.value); setSearched(false); setSearchError(""); }} /></label>}
     <div className="fields search-time-fields">
-      <label>搜索开始时间<input type="datetime-local" step="1" value={searchStart} disabled={props.disabled || searchBusy || generationScopeLocked} onChange={event => { setSearchStart(event.target.value); setExcludedMessageIds([]); }} /></label>
-      <label>搜索结束时间（不包含）<input type="datetime-local" step="1" value={searchEnd} disabled={props.disabled || searchBusy || generationScopeLocked} onChange={event => { setSearchEnd(event.target.value); setExcludedMessageIds([]); }} /></label>
+      <label>搜索开始时间<input type="datetime-local" step="1" value={searchStart} disabled={props.disabled || searchBusy || generationScopeLocked} onChange={event => { setSearchStart(event.target.value); setExcludedMessageIds([]); if (retrievalMode === "topic") { setResults([]); setSearched(false); } }} /></label>
+      <label>搜索结束时间（不包含）<input type="datetime-local" step="1" value={searchEnd} disabled={props.disabled || searchBusy || generationScopeLocked} onChange={event => { setSearchEnd(event.target.value); setExcludedMessageIds([]); if (retrievalMode === "topic") { setResults([]); setSearched(false); } }} /></label>
     </div>
     {invalidRange && <p role="alert">搜索时间范围无效。</p>}
-    <div className="actions"><button type="button" disabled={!selected.length || invalidRange || searchBusy || props.disabled || generationScopeLocked} onClick={() => void search()}>搜索本地聊天</button>
-      {searchError && lastSearch.current && <button type="button" disabled={searchBusy || generationScopeLocked} onClick={() => void search(lastSearch.current)}>重试上次搜索</button>}</div>
+    <div className="actions"><button type="button" disabled={!selected.length || invalidRange || searchBusy || expansionBusy || props.disabled || generationScopeLocked || (retrievalMode === "topic" && !summaryTerms.length)}
+      onClick={() => retrievalMode === "topic" ? void searchSummary() : void search()}>{retrievalMode === "topic" ? "搜索相关消息" : "搜索本地聊天"}</button>
+      {retrievalMode === "direct" && searchError && lastSearch.current && <button type="button" disabled={searchBusy || generationScopeLocked} onClick={() => void search(lastSearch.current)}>重试上次搜索</button>}</div>
     {searchBusy && <p role="status">正在搜索本地索引…</p>}
     {searchError && <p role="alert">{searchError}</p>}
     {searched && !results.length && !searchBusy && <p>没有匹配的本地聊天记录。</p>}
+    {searched && retrievalMode === "topic" && !!results.length && <p>已补充 {contextMessageIds.length} 条上下文（命中前后 6 条及命中段之间不超过 12 条的短间隙，同一会话和时间范围）；请一并预览、排除。</p>}
     {!!results.length && <section aria-label="搜索结果" className="search-results"><ol>{results.map(item => <li key={item.message_id}>
-      <div className="result-meta"><strong>{safeSender(item)}</strong><time dateTime={item.timestamp}>{new Date(item.timestamp).toLocaleString("zh-CN")}</time></div>
+      <div className="result-meta"><strong>{safeSender(item)}</strong><time dateTime={item.timestamp || undefined}>{item.timestamp ? new Date(item.timestamp).toLocaleString("zh-CN") : "时间未知"}</time></div>
+      {contextMessageIds.includes(item.message_id) && <small>补充上下文</small>}
       <p>{item.text ?? "[非文本消息]"}</p><small>{item.conversation_id} · {item.batch_id} · {item.snapshot_id}</small>
       <label className="check result-exclusion"><input type="checkbox"
         checked={excludedMessageIds.includes(item.message_id)}
@@ -295,6 +353,8 @@ export function ChatSearchPanel(props: Props) {
         onChange={() => toggleExcluded(item.message_id)} />不用于 AI 生成</label>
     </li>)}</ol>{cursor && <button type="button" disabled={searchBusy || generationScopeLocked} onClick={() => { const next = request(cursor); void search(next, true); }}>加载更多结果</button>}</section>}
     <GenerationPanel api={props.api} sourceId={props.sourceId} account={props.account}
+      retrievalTopic={retrievalMode === "topic" ? summaryTopic : undefined}
+      includedMessageIds={retrievalMode === "topic" ? (searched ? results.map(item => item.message_id) : []) : undefined}
       conversationSelectionIds={selected}
       conversationLabels={props.conversations.filter(item => selected.includes(item.conversation_selection_id)).map(item => item.display_name)}
       excludedMessageIds={excludedMessageIds}

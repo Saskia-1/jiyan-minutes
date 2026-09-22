@@ -33,6 +33,7 @@ class SelectionSearchRequest(BaseModel):
     end_time: datetime
     limit: int = Field(default=25, ge=1, le=100)
     cursor: str | None = Field(default=None, min_length=1, max_length=2048)
+    include_undated: bool = False
 
     @field_validator("conversation_selection_ids", mode="before")
     @classmethod

@@ -301,6 +301,17 @@ def test_search_uses_deterministic_bound_cursor_and_deduplicates_snapshots(searc
         )
 
 
+def test_ascii_keywords_match_chat_case_without_becoming_sql_patterns(search_service):
+    service, _, messages = search_service
+    request = SearchRequest(
+        query="LITERAL 100%_SAFE", conversation_ids=("conversation-a",),
+        start_time=datetime(2026, 9, 1, tzinfo=UTC),
+        end_time=datetime(2026, 9, 4, tzinfo=UTC), limit=20,
+    )
+    assert [item.message_id for item in service.search(request, session_id="session-a").results] == [messages[0].message_id]
+    assert not service.search(request.model_copy(update={"query": "LITERAL 100%SAFE"}), session_id="session-a").results
+
+
 def test_search_never_exposes_another_session_or_unsearchable_snapshot(search_service) -> None:
     service, repository, _ = search_service
     hidden = (

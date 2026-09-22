@@ -24,6 +24,7 @@ class SearchRequest(BaseModel):
     end_time: datetime
     limit: int = Field(default=25, ge=1, le=100)
     cursor: str | None = Field(default=None, min_length=1, max_length=2048)
+    include_undated: bool = False
 
     @field_validator("conversation_ids", mode="before")
     @classmethod
@@ -88,7 +89,8 @@ class SearchResult(BaseModel):
 
     message_id: str
     conversation_id: str
-    timestamp: datetime
+    timestamp: datetime | None
+    source_order: int | None = Field(default=None, exclude_if=lambda value: value is None)
     sender_id: str | None
     sender_name: str | None
     text: str | None

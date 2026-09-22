@@ -30,6 +30,7 @@ class ChatSearchService:
                 "snapshot_id": request.snapshot_id,
                 "start_time": request.start_time.isoformat(),
                 "end_time": request.end_time.isoformat(),
+                "include_undated": request.include_undated,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -40,7 +41,7 @@ class ChatSearchService:
     @classmethod
     def _decode_cursor(
         cls, request: SearchRequest
-    ) -> tuple[str, str] | None:
+    ) -> tuple[str, str] | tuple[int, str] | None:
         if request.cursor is None:
             return None
         try:
@@ -52,18 +53,22 @@ class ChatSearchService:
                 not isinstance(payload, dict)
                 or payload.get("v") != 1
                 or payload.get("f") != cls._criteria_fingerprint(request)
-                or not isinstance(payload.get("t"), str)
                 or not isinstance(payload.get("m"), str)
             ):
-                raise ValueError
-            timestamp = datetime.fromisoformat(payload["t"])
-            if timestamp.tzinfo is None or timestamp.utcoffset() is None:
                 raise ValueError
             message_id = payload["m"]
             if not message_id or len(message_id) > 128:
                 raise ValueError
+            if request.include_undated:
+                order = payload.get("o")
+                if type(order) is not int or order < 0:
+                    raise ValueError
+                return order, message_id
+            timestamp = datetime.fromisoformat(payload["t"])
+            if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+                raise ValueError
             return timestamp.isoformat(), message_id
-        except (UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+        except (UnicodeError, ValueError, TypeError, KeyError, json.JSONDecodeError):
             raise ValueError("search cursor does not match this request") from None
 
     @classmethod
@@ -72,7 +77,8 @@ class ChatSearchService:
             {
                 "v": 1,
                 "f": cls._criteria_fingerprint(request),
-                "t": result.timestamp.isoformat(),
+                "t": result.timestamp.isoformat() if result.timestamp else None,
+                "o": result.source_order if result.source_order is not None else 9223372036854775807,
                 "m": result.message_id,
             },
             sort_keys=True,
@@ -84,7 +90,7 @@ class ChatSearchService:
         if not isinstance(session_id, str) or not session_id:
             raise PermissionError("local session is unavailable")
         cursor = self._decode_cursor(request)
-        rows = self._repository.search_messages(
+        rows = self._repositohanwery.search_messages(
             session_digest=digest(session_id),
             query=request.query,
             conversation_ids=request.conversation_ids,
@@ -93,13 +99,15 @@ class ChatSearchService:
             end_time_utc=request.end_time.isoformat(),
             cursor=cursor,
             limit=request.limit + 1,
+            include_undated=request.include_undated,
         )
         try:
             results = tuple(
                 SearchResult(
                     message_id=str(row["message_id"]),
                     conversation_id=str(row["conversation_id"]),
-                    timestamp=datetime.fromisoformat(str(row["sent_at_utc"])),
+                    timestamp=datetime.fromisoformat(str(row["sent_at_utc"])) if row["sent_at_utc"] is not None else None,
+                    source_order=row["source_order"],
                     sender_id=row["sender_id"],
                     sender_name=row["sender_name"],
                     text=row["text"],

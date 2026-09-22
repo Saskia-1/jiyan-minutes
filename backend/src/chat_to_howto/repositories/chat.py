@@ -2498,6 +2498,7 @@ class ChatRepository:
             snapshot_id,
             snapshot_id,
             *conversation_ids,
+            int(include_undated),
             start_time_utc,
             end_time_utc,
             query,
@@ -2508,6 +2509,10 @@ class ChatRepository:
             cursor_message_id,
             limit,
         ]
+        time_condition = "((? = 1 AND message.sent_at_utc IS NULL) OR (message.sent_at_utc >= ? AND message.sent_at_utc < ?))"
+        order_value = "COALESCE(source_order, 9223372036854775807)" if include_undated else "sent_at_utc"
+        comparison = ">" if include_undated else "<"
+        direction = "ASC" if include_undated else "DESC"
         with self._lock:
             rows = self._connection.execute(
                 f"""
@@ -2524,6 +2529,7 @@ class ChatRepository:
                         message.message_id,
                         message.conversation_id,
                         message.sent_at_utc,
+                        message.source_order,
                         message.sender_id,
                         message.sender_name,
                         message.text,
@@ -2546,20 +2552,19 @@ class ChatRepository:
                     WHERE snapshot.sealed = 1
                       AND (? IS NULL OR snapshot.snapshot_id = ?)
                       AND message.conversation_id IN ({placeholders})
-                      AND message.sent_at_utc >= ?
-                      AND message.sent_at_utc < ?
-                      AND (? = '' OR instr(COALESCE(message.text, ''), ?) > 0)
+                      AND {time_condition}
+                      AND (? = '' OR instr(lower(COALESCE(message.text, '')), lower(?)) > 0)
                 )
-                SELECT message_id, conversation_id, sent_at_utc,
+                SELECT message_id, conversation_id, sent_at_utc, source_order,
                        sender_id, sender_name, text, batch_id, snapshot_id
                 FROM eligible
                 WHERE duplicate_rank = 1
                   AND (
                     ? IS NULL
-                    OR sent_at_utc < ?
-                    OR (sent_at_utc = ? AND message_id > ?)
+                    OR {order_value} {comparison} ?
+                    OR ({order_value} = ? AND message_id > ?)
                   )
-                ORDER BY sent_at_utc DESC, message_id ASC
+                ORDER BY {order_value} {direction}, message_id ASC
                 LIMIT ?
                 """,
                 tuple(parameters),
