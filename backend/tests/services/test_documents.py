@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 
 import pytest
 
 from chat_to_howto.api.session import digest
-from chat_to_howto.domain.generation import GenerationBudget
+from chat_to_howto.domain.generation import GenerationBudget, GenerationResult
 from chat_to_howto.domain.jobs import ExportConversation, ExportScope
 from chat_to_howto.domain.messages import MessageInput
 from chat_to_howto.providers.fake import FakeProvider
@@ -26,7 +27,7 @@ UTC = timezone.utc
 NOW = datetime(2026, 9, 5, tzinfo=UTC)
 
 
-def _generated(tmp_path):
+def _generated(tmp_path, *, insufficient=False):
     repository = ChatRepository(tmp_path / "chat.sqlite3")
     scope = ExportScope(
         source_id="synthetic",
@@ -83,7 +84,7 @@ def _generated(tmp_path):
         snapshot_id="snapshot-a",
         searchable=1,
     )
-    provider = FakeProvider()
+    provider = FakeProvider(content=json.dumps({"result": GenerationResult.insufficient().model_dump(), "evidence": []}) if insufficient else None)
     generator = GenerationJobOrchestrator(
         repository=repository,
         provider_factory=lambda _name: provider,
@@ -124,6 +125,31 @@ def _generated(tmp_path):
     completed = generator.run_job(job.job_id)
     assert completed.state == "complete"
     return repository, provider, completed.job_id, message.message_id
+
+
+def test_insufficient_ai_result_can_be_freely_edited_without_changing_ai_original(tmp_path):
+    repository, provider, job_id, _ = _generated(tmp_path, insufficient=True)
+    try:
+        service = DocumentService(repository=repository, clock=lambda: NOW)
+        original = service.create_from_generation(job_id, session_id="session-a")
+        edited = service.create_version(
+            original.document_id,
+            parent_version_id=original.current_version.version_id,
+            content=original.current_version.content.model_copy(update={
+                "title": "用户自己的标题", "user_text": "用户自己的标题\n\n我的补充内容",
+            }),
+            change_summary="用户确认完整文本", session_id="session-a",
+        )
+        recovered = service.get_document(original.document_id, session_id="session-a")
+        assert recovered.current_version == edited.current_version
+        assert recovered.current_version.content.title == "用户自己的标题"
+        assert recovered.current_version.content.user_text == "用户自己的标题\n\n我的补充内容"
+        assert recovered.current_version.origin == "user_edited"
+        assert recovered.versions[0] == original.current_version
+        assert recovered.versions[0].content == GenerationResult.insufficient()
+        assert provider.call_count == 1
+    finally:
+        repository.close()
 
 
 def test_ai_version_and_user_edit_are_append_only_and_have_distinct_provenance(tmp_path):

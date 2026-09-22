@@ -23,6 +23,7 @@ const document: HowToDocument = { document_id: "document:p3", source_generation_
 
 it("页面初始化时恢复文档列表并可打开最新版本", async () => {
   const api = { recoverDocuments: vi.fn().mockResolvedValue({ documents: [document], next_cursor: null }),
+    document: vi.fn().mockResolvedValue(document),
     createDocumentVersion: vi.fn(), restoreDocumentVersion: vi.fn(), exportDocument: vi.fn(),
     prepareDeletion: vi.fn(), confirmDeletion: vi.fn() } as unknown as LocalApiClient;
   const user = userEvent.setup();
@@ -33,4 +34,34 @@ it("页面初始化时恢复文档列表并可打开最新版本", async () => {
   await user.click(screen.getByRole("button", { name: "打开最新版本" }));
   expect(await screen.findByRole("textbox", { name: "文档标题" })).toHaveValue("指南 version 2");
   expect(api.recoverDocuments).toHaveBeenCalledWith(null);
+});
+
+it("简洁工作区重新打开同一文档时从服务取最新版本，不预览缓存版本", async () => {
+  let latest = document;
+  const api = { recoverDocuments: vi.fn().mockResolvedValue({ documents: [document], next_cursor: null }),
+    document: vi.fn(async () => latest) } as unknown as LocalApiClient;
+  const user = userEvent.setup();
+  const { ImportedChatWorkspace } = await import("../imports/ImportedChatWorkspace");
+  render(<ImportedChatWorkspace api={api} committed={null} sourceControls={null} outputRootId=""
+    importBusy={false} onScopeLockChange={() => undefined} />);
+  await user.click(screen.getByText("已保存的文档"));
+  await user.click(await screen.findByRole("button", { name: "打开最新版本" }));
+  expect(await screen.findByRole("heading", { name: "指南 version 2" })).toBeVisible();
+  latest = { ...document, current_version: { ...version, ordinal: 3, version_id: "document-version:3",
+    content: { ...content, title: "已确认的新标题", user_text: "已确认的新标题\n\n最新正文" } } };
+  await user.click(screen.getByRole("button", { name: "打开最新版本" }));
+  expect(await screen.findByRole("heading", { name: "已确认的新标题" })).toBeVisible();
+  expect(screen.getByText(/最新正文/)).toBeVisible();
+  expect(screen.queryByRole("heading", { name: "指南 version 2" })).not.toBeInTheDocument();
+});
+
+it("读取最新版本失败时报告错误，不把列表缓存当作最新文档", async () => {
+  const api = { recoverDocuments: vi.fn().mockResolvedValue({ documents: [document], next_cursor: null }),
+    document: vi.fn().mockRejectedValue(new Error("offline")) } as unknown as LocalApiClient;
+  const { DocumentLibrary } = await import("./DocumentLibrary");
+  render(<DocumentLibrary api={api} outputRootId="" />);
+  await userEvent.setup().click(await screen.findByRole("button", { name: "打开最新版本" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("最新版本");
+  expect(screen.queryByRole("textbox", { name: "文档标题" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "打开最新版本" })).toBeEnabled();
 });

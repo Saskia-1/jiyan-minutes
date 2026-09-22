@@ -3,7 +3,7 @@ import type { LocalApiClient } from "../../api/client";
 import type { HowToDocument } from "../../types";
 import { DocumentEditor } from "./DocumentEditor";
 
-export function DocumentLibrary({ api, outputRootId }: { api: LocalApiClient; outputRootId: string }) {
+export function DocumentLibrary({ api, outputRootId, onOpen }: { api: LocalApiClient; outputRootId: string; onOpen?: (document: HowToDocument) => void }) {
   const [documents, setDocuments] = useState<HowToDocument[]>([]);
   const [opened, setOpened] = useState<HowToDocument | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -29,6 +29,17 @@ export function DocumentLibrary({ api, outputRootId }: { api: LocalApiClient; ou
 
   useEffect(() => { void load(null); }, [api]);
 
+  async function openLatest(documentId: string) {
+    if (busy) return;
+    setBusy(true); setError("");
+    try {
+      const latest = await api.document(documentId);
+      setDocuments(items => items.map(item => item.document_id === documentId ? latest : item));
+      if (onOpen) onOpen(latest); else setOpened(latest);
+    } catch { setError("无法打开最新版本，请重试；当前文档未被更改。"); }
+    finally { setBusy(false); }
+  }
+
   function remove(documentId: string) {
     setDocuments(items => items.filter(item => item.document_id !== documentId));
     setOpened(current => current?.document_id === documentId ? null : current);
@@ -40,14 +51,14 @@ export function DocumentLibrary({ api, outputRootId }: { api: LocalApiClient; ou
     {documents.map(item => <article key={item.document_id}>
       <strong>{item.current_version.content.title}</strong>
       <p>最新版本 {item.current_version.ordinal} · 更新于 <time dateTime={item.updated_at}>{item.updated_at}</time></p>
-      <button type="button" disabled={busy} onClick={() => setOpened(item)}>
+      <button type="button" disabled={busy} onClick={() => void openLatest(item.document_id)}>
         {opened?.document_id === item.document_id ? "当前已打开" : "打开最新版本"}
       </button>
     </article>)}
     {nextCursor && <button type="button" disabled={busy} onClick={() => void load(nextCursor)}>加载更早文档</button>}
     {busy && <p role="status">正在恢复已生成文档…</p>}
     {error && <p role="alert">{error}</p>}
-    {opened && <DocumentEditor key={opened.document_id} api={api} initialDocument={opened}
+    {opened && <DocumentEditor key={`${opened.document_id}:${opened.current_version.version_id}`} api={api} initialDocument={opened}
       outputRootId={outputRootId} onDeleted={remove} />}
   </section>;
 }

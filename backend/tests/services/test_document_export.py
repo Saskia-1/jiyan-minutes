@@ -12,7 +12,7 @@ from zipfile import ZipFile
 from docx import Document
 
 from chat_to_howto.domain.documents import DocumentVersion, HowToDocument
-from chat_to_howto.domain.generation import Check, Conflict, GenerationResult, Preparation, Step
+from chat_to_howto.domain.generation import Check, Conflict, GenerationResult, Preparation, Step, ProfessionalExtension
 from chat_to_howto.services.artifacts import ApprovedOutputRoot
 from chat_to_howto.services.document_export import (
     DocumentExportService,
@@ -55,6 +55,18 @@ def _document() -> HowToDocument:
 def _all_docx_text(payload: bytes) -> str:
     document = Document(BytesIO(payload))
     return "\n".join(paragraph.text for paragraph in document.paragraphs)
+
+
+def test_professional_extension_is_labeled_and_not_added_to_original_evidence():
+    doc = _document()
+    content = doc.current_version.content.model_copy(update={"professional_extensions": (
+        ProfessionalExtension(heading="机制说明", text="这是 AI 的解释，不是参与者原话。"),)})
+    version = doc.current_version.model_copy(update={"content": content})
+    for text in (render_markdown(version, doc.source_evidence, source_mode="with_sources").decode(),
+                 _all_docx_text(render_docx(version, doc.source_evidence, source_mode="with_sources"))):
+        assert "专业补充" in text and "这是 AI 的解释" in text
+        assert "完整证据" in text
+    assert "AI 的解释" not in doc.source_evidence[0].quote
 
 
 def test_markdown_is_utf8_structured_and_escapes_user_markdown_as_literal_text() -> None:

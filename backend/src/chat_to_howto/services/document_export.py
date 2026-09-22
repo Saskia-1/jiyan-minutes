@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from chat_to_howto.api.session import digest
 from chat_to_howto.domain.documents import DocumentVersion, HowToDocument
+from chat_to_howto.domain.generation import TopicSummary, summary_groups
 from chat_to_howto.services.artifacts import (
     ApprovedOutputRoot,
     _open_or_create_private_directory,
@@ -63,6 +64,18 @@ class DocumentExportService:
         self._repository = repository
         self._roots = dict(approved_roots)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def download(self, document_id: str, *, version_id: str, format: DocumentFormat,
+                 source_mode: SourceMode, session_id: str) -> tuple[str, bytes]:
+        if format not in {"markdown", "docx"} or source_mode not in {"body_only", "with_sources"}:
+            raise ValueError("unsupported document export options")
+        document = self._documents.get_document(document_id, session_id=session_id)
+        version = next((item for item in document.versions if item.version_id == version_id), None)
+        if version is None:
+            raise ValueError("document version does not exist")
+        payload = (render_markdown(version, document.source_evidence, source_mode=source_mode)
+                   if format == "markdown" else render_docx(version, document.source_evidence, source_mode=source_mode))
+        return f"{_safe_slug(version.content.title)}.{'md' if format == 'markdown' else 'docx'}", payload
 
     def export(self, document_id: str, *, version_id: str, format: DocumentFormat,
                source_mode: SourceMode, output_root_id: str, session_id: str) -> DocumentArtifact:
@@ -153,6 +166,34 @@ def render_markdown(version: DocumentVersion, evidence: tuple[ValidatedEvidence,
     content = version.content
     lines = [f"# {_md(content.title)}", "", f"版本：{version.ordinal}",
              f"来源：{_origin_label(version.origin)}", f"创建时间：{version.created_at.isoformat()}", ""]
+    if content.user_text is not None:
+        lines = [_md(content.user_text), ""]
+    elif content.summary is not None:
+        for label, items in summary_groups(content.summary):
+            if items:
+                lines += [f"## {_md(label)}", ""]
+                for item in items:
+                    lines += [(_md(item.text) if isinstance(content.summary, TopicSummary) else f"- {_md(item.text)}"), ""]
+                    if source_mode == "with_sources" and isinstance(content.summary, TopicSummary):
+                        lines += [_source_reference(item.source_message_ids, version, evidence), ""]
+    else:
+        lines += _guide_markdown_body(content)
+    if content.user_text is None and content.professional_extensions:
+        lines += ["## 专业补充（AI 提供，非原聊天内容）", ""]
+        for item in content.professional_extensions:
+            lines += [f"### {_md(item.heading)}", "", _md(item.text), ""]
+    if source_mode == "with_sources":
+        lines += ["## 来源证据", ""]
+        for index, item in enumerate(_used_evidence(version, evidence), 1):
+            sender = item.sender_name or item.sender_id or "未知发送者"
+            lines += [f"### 证据 {index}", "", f"- 发送者：{_md(sender)}",
+                      f"- 时间：{item.timestamp.isoformat() if item.timestamp else '时间未知'}", f"- 会话：{_md(item.conversation_id)}",
+                      f"- 消息标识：{_md(item.message_id)}", "", _md(item.quote), ""]
+    return ("\n".join(lines).rstrip() + "\n").encode("utf-8")
+
+
+def _guide_markdown_body(content) -> list[str]:
+    lines: list[str] = []
     if content.preparations:
         lines += ["## 准备", ""] + [f"- {_md(item.text)}" for item in content.preparations] + [""]
     lines += ["## 步骤", ""]
@@ -174,14 +215,7 @@ def render_markdown(version: DocumentVersion, evidence: tuple[ValidatedEvidence,
             lines += [f"### {_md(item.description)}", "", f"- 说法 A：{_md(item.claim_a)}",
                       f"- 说法 B：{_md(item.claim_b)}",
                       f"- 处理：{_md(item.resolution) if item.resolution else '尚未解析'}", ""]
-    if source_mode == "with_sources":
-        lines += ["## 来源证据", ""]
-        for index, item in enumerate(_used_evidence(version, evidence), 1):
-            sender = item.sender_name or item.sender_id or "未知发送者"
-            lines += [f"### 证据 {index}", "", f"- 发送者：{_md(sender)}",
-                      f"- 时间：{item.timestamp.isoformat()}", f"- 会话：{_md(item.conversation_id)}",
-                      f"- 消息标识：{_md(item.message_id)}", "", _md(item.quote), ""]
-    return ("\n".join(lines).rstrip() + "\n").encode("utf-8")
+    return lines
 
 
 def render_docx(version: DocumentVersion, evidence: tuple[ValidatedEvidence, ...], *, source_mode: SourceMode) -> bytes:
@@ -199,8 +233,42 @@ def render_docx(version: DocumentVersion, evidence: tuple[ValidatedEvidence, ...
         style._element.rPr.rFonts.set(qn("w:eastAsia"), "Hiragino Sans GB")
     document.styles["Normal"].font.size = Pt(11)
     document.styles["Title"].font.size = Pt(24)
-    document.add_paragraph(content.title, style="Title")
-    document.add_paragraph(f"版本 {version.ordinal} · {_origin_label(version.origin)} · {version.created_at.isoformat()}")
+    if content.user_text is not None:
+        for index, line in enumerate(content.user_text.splitlines()):
+            document.add_paragraph(line, style="Title" if index == 0 else "Normal")
+    else:
+        document.add_paragraph(content.title, style="Title")
+        document.add_paragraph(f"版本 {version.ordinal} · {_origin_label(version.origin)} · {version.created_at.isoformat()}")
+    if content.user_text is not None:
+        pass
+    elif content.summary is not None:
+        for label, items in summary_groups(content.summary):
+            if items:
+                document.add_heading(label, level=1)
+                for item in items:
+                    document.add_paragraph(item.text, style="Normal" if isinstance(content.summary, TopicSummary) else "List Bullet")
+                    if source_mode == "with_sources" and isinstance(content.summary, TopicSummary):
+                        document.add_paragraph(_source_reference(item.source_message_ids, version, evidence))
+    else:
+        _add_guide_docx_body(document, content)
+    if content.user_text is None and content.professional_extensions:
+        document.add_heading("专业补充（AI 提供，非原聊天内容）", level=1)
+        for item in content.professional_extensions:
+            document.add_heading(item.heading, level=2)
+            document.add_paragraph(item.text)
+    if source_mode == "with_sources":
+        document.add_heading("来源证据", level=1)
+        for index, item in enumerate(_used_evidence(version, evidence), 1):
+            document.add_heading(f"证据 {index}", level=2)
+            sender = item.sender_name or item.sender_id or "未知发送者"
+            document.add_paragraph(f"{sender} · {item.timestamp.isoformat() if item.timestamp else '时间未知'} · {item.conversation_id}")
+            document.add_paragraph(item.quote)
+            document.add_paragraph(f"消息标识：{item.message_id}")
+    buffer = BytesIO(); document.save(buffer)
+    return _strip_docx_rsids(buffer.getvalue())
+
+
+def _add_guide_docx_body(document, content) -> None:
     if content.preparations:
         document.add_heading("准备", level=1)
         for item in content.preparations: document.add_paragraph(item.text, style="List Bullet")
@@ -224,27 +292,25 @@ def render_docx(version: DocumentVersion, evidence: tuple[ValidatedEvidence, ...
             document.add_paragraph(f"说法 A：{item.claim_a}")
             document.add_paragraph(f"说法 B：{item.claim_b}")
             document.add_paragraph(f"处理：{item.resolution or '尚未解析'}")
-    if source_mode == "with_sources":
-        document.add_heading("来源证据", level=1)
-        for index, item in enumerate(_used_evidence(version, evidence), 1):
-            document.add_heading(f"证据 {index}", level=2)
-            sender = item.sender_name or item.sender_id or "未知发送者"
-            document.add_paragraph(f"{sender} · {item.timestamp.isoformat()} · {item.conversation_id}")
-            document.add_paragraph(item.quote)
-            document.add_paragraph(f"消息标识：{item.message_id}")
-    buffer = BytesIO(); document.save(buffer)
-    return _strip_docx_rsids(buffer.getvalue())
 
 
 def _used_evidence(version: DocumentVersion, evidence: tuple[ValidatedEvidence, ...]) -> tuple[ValidatedEvidence, ...]:
     identifiers: list[str] = []
     content = version.content
+    if content.summary is not None:
+        for _label, items in summary_groups(content.summary):
+            for item in items: identifiers.extend(item.source_message_ids)
     for item in (*content.preparations, *content.steps, *content.checks): identifiers.extend(item.source_message_ids)
     for item in content.conflicts:
         identifiers.extend(item.claim_a_source_message_ids); identifiers.extend(item.claim_b_source_message_ids)
         identifiers.extend(item.resolution_source_message_ids)
     wanted = set(identifiers)
     return tuple(item for item in evidence if item.message_id in wanted)
+
+
+def _source_reference(identifiers, version, evidence) -> str:
+    numbers = {item.message_id: index for index, item in enumerate(_used_evidence(version, evidence), 1)}
+    return f"依据：{len(identifiers)} 条原始消息（" + "、".join(f"证据 {numbers[value]}" for value in identifiers) + "）"
 
 
 def _origin_label(value: str) -> str:

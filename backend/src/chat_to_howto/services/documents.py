@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from chat_to_howto.api.session import digest
 from chat_to_howto.domain.documents import DocumentRecoveryPage, DocumentVersion, HowToDocument
-from chat_to_howto.domain.generation import GenerationResult
+from chat_to_howto.domain.generation import GenerationResult, summary_groups
 from chat_to_howto.repositories.chat import ChatRepository
 from chat_to_howto.services.evidence_validation import ValidatedGeneration
 
@@ -245,6 +245,10 @@ def _reject_controls(values: Iterable[str]) -> None:
 
 def _referenced_message_ids(result: GenerationResult) -> tuple[str, ...]:
     ordered: list[str] = []
+    if result.summary is not None:
+        for _label, items in summary_groups(result.summary):
+            for item in items:
+                ordered.extend(item.source_message_ids)
     for item in (*result.preparations, *result.steps, *result.checks):
         ordered.extend(item.source_message_ids)
     for conflict in result.conflicts:
