@@ -119,6 +119,10 @@ class DeepSeekProvider:
                 {"role": "user", "content": request.payload.decode("utf-8")},
             ],
             "response_format": {"type": "json_object"},
+            # The bounded output budget is for the structured document, not hidden reasoning.
+            "thinking": {"type": "disabled"},
+            # This adapter produces grounded structured data, not creative chat.
+            "temperature": 0,
             "max_tokens": request.max_output_tokens,
             "stream": False,
         }

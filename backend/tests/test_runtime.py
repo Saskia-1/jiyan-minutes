@@ -104,10 +104,12 @@ def test_runtime_app_exposes_gate1_no_go_blockers_for_both_sources(
     )
     captured = {}
     provider = object()
+    monkeypatch.setattr(runtime_module, "load_deepseek_environment", lambda _root: True)
 
     class DeepSeekProviderStub:
         @classmethod
-        def from_environment(cls):
+        def from_environment(cls, *, timeout_seconds):
+            assert timeout_seconds == 180
             return provider
 
     monkeypatch.setattr(

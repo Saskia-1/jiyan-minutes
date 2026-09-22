@@ -81,10 +81,21 @@ class FakeProvider:
     def _deterministic_result(request: ProviderRequest) -> str:
         try:
             payload = json.loads(request.payload)
+            if isinstance(payload, dict) and payload.get("operation") == "expand_topic":
+                topic = payload.get("topic")
+                terms = {
+                    "就业": ["就业", "求职", "秋招", "实习", "offer", "面试", "简历"],
+                    "腾讯音乐黑客松": ["腾讯音乐黑客松", "音乐", "BGM", "哼鸣", "歌单", "标签", "music", "创意"],
+                }.get(topic, [topic])
+                return json.dumps({"terms": terms}, ensure_ascii=False, sort_keys=True)
+            summary = isinstance(payload, dict) and payload.get("generation_kind") == "summary"
+            summary_type = payload.get("summary_type") if isinstance(payload, dict) else None
             messages = payload.get("messages", []) if isinstance(payload, dict) else []
             first = messages[0] if isinstance(messages, list) and messages else None
             message_id = first.get("message_id") if isinstance(first, dict) else None
         except (TypeError, UnicodeDecodeError, ValueError):
+            summary = False
+            summary_type = None
             message_id = None
         if not isinstance(message_id, str) or not message_id.strip():
             result: dict[str, object] = {
@@ -97,27 +108,60 @@ class FakeProvider:
                 "conflicts": [],
             }
             evidence: list[dict[str, str]] = []
+        elif summary_type in {"viewpoints", "ideas", "how_to", "mixed"}:
+            # Contract fixture, deliberately not a semantic-quality model.
+            identifiers = [message["message_id"] for message in messages]
+            text = "\n".join(message["text"] for message in messages)
+            result = {
+                "status": "complete", "title": f"确定性测试：{payload.get('topic', '')}",
+                "preparations": [], "steps": [], "checks": [],
+                "missing_information": [], "conflicts": [],
+            }
+            if summary_type == "how_to":
+                result["steps"] = [{
+                    "instruction": text, "location": None, "parameters": [],
+                    "conditions": [], "warnings": [], "expected_result": None,
+                    "source_message_ids": identifiers,
+                }]
+            else:
+                result["summary"] = {"summary_type": summary_type, "sections": [{
+                    "heading": {"viewpoints": "观点及依据", "ideas": "构思与使用场景", "mixed": "主题信息"}[summary_type],
+                    "text": text, "source_message_ids": identifiers,
+                }]}
+            evidence = [{"message_id": message["message_id"]} for message in messages]
         else:
             first_text = first.get("text") if isinstance(first, dict) else None
-            result = {
-                "status": "complete",
-                "title": "确定性测试操作指南",
-                "preparations": [],
-                "steps": [
-                    {
-                        "instruction": "按选定消息执行操作",
-                        "location": None,
-                        "parameters": [],
-                        "conditions": [],
-                        "warnings": [],
-                        "expected_result": None,
-                        "source_message_ids": [message_id],
-                    }
-                ],
-                "checks": [],
-                "missing_information": [],
-                "conflicts": [],
-            }
+            result = (
+                {
+                    "status": "complete", "title": "确定性测试聊天总结",
+                    "preparations": [], "steps": [], "checks": [],
+                    "missing_information": [], "conflicts": [],
+                    "summary": {
+                        "core_summary": [{"text": first_text, "source_message_ids": [message_id]}],
+                        "discussions": [], "decisions": [], "action_items": [],
+                        "open_questions": [],
+                    },
+                }
+                if summary else {
+                    "status": "complete",
+                    "title": "确定性测试操作指南",
+                    "preparations": [],
+                    "steps": [
+                        {
+                            "instruction": "按选定消息执行操作",
+                            "location": None,
+                            "parameters": [],
+                            "conditions": [],
+                            "warnings": [],
+                            "expected_result": None,
+                            "source_message_ids": [message_id],
+                        }
+                    ],
+                    "checks": [],
+                    "missing_information": [],
+                    "conflicts": [],
+                }
+            )
             evidence = [
                 {
                     "message_id": message_id,
@@ -125,7 +169,7 @@ class FakeProvider:
                 }
             ]
         return json.dumps(
-            {"result": result, "evidence": evidence},
+            {"result": result} if summary_type else {"result": result, "evidence": evidence},
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),

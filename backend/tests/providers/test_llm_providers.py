@@ -73,6 +73,35 @@ def test_fake_provider_success_malformed_and_partial_are_stable() -> None:
     assert success.provider == malformed.provider == partial.provider == "fake"
 
 
+def test_fake_provider_returns_stable_topic_expansion_without_chat_messages() -> None:
+    request = _request(payload=b'{"operation":"expand_topic","topic":"\xe5\xb0\xb1\xe4\xb8\x9a"}')
+
+    first = _run(FakeProvider().generate(request, CancellationToken()))
+    second = _run(FakeProvider().generate(request, CancellationToken()))
+
+    assert first.content == second.content
+    assert json.loads(first.content) == {
+        "terms": ["就业", "求职", "秋招", "实习", "offer", "面试", "简历"],
+    }
+
+
+def test_fake_provider_summary_is_stable_and_cites_the_supplied_message() -> None:
+    request = _request(payload=json.dumps({
+        "generation_kind": "summary", "topic": "就业",
+        "messages": [{"message_id": "m1", "text": "合成就业讨论"}],
+    }, ensure_ascii=False).encode("utf-8"))
+
+    first = _run(FakeProvider().generate(request, CancellationToken()))
+    second = _run(FakeProvider().generate(request, CancellationToken()))
+
+    assert first.content == second.content
+    parsed = json.loads(first.content)
+    assert parsed["result"]["summary"]["core_summary"] == [
+        {"text": "合成就业讨论", "source_message_ids": ["m1"]},
+    ]
+    assert parsed["evidence"] == [{"message_id": "m1", "quote": "合成就业讨论"}]
+
+
 def test_fake_provider_waits_for_and_observes_cancellation() -> None:
     async def scenario() -> None:
         token = CancellationToken()
@@ -121,6 +150,8 @@ def test_deepseek_uses_fixed_endpoint_bearer_auth_json_output_and_no_ambient_sta
                 {"role": "user", "content": _request().payload.decode("utf-8")},
             ],
             "response_format": {"type": "json_object"},
+            "thinking": {"type": "disabled"},
+            "temperature": 0,
             "max_tokens": 2_000,
             "stream": False,
         }

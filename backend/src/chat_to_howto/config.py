@@ -3,8 +3,38 @@
 from __future__ import annotations
 
 import os
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
+def load_deepseek_environment(project_root: Path) -> bool:
+    """Load only the declared credential; never execute shell or echo its value."""
+    if os.getenv("DEEPSEEK_API_KEY", "").strip():
+        return True
+    path = project_root / ".env"
+    if not path.exists():
+        return False
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 * 1024:
+        raise ValueError("local environment file is invalid")
+    try:
+        for line in path.read_text(encoding="utf-8-sig").splitlines():
+            line = line.strip()
+            if line.startswith("export "):
+                line = line[7:].lstrip()
+            name, separator, raw = line.partition("=")
+            if not separator or name.strip() != "DEEPSEEK_API_KEY":
+                continue
+            values = shlex.split(raw, comments=True, posix=True)
+            if not values or (len(values) == 1 and not values[0].strip()):
+                return False
+            if len(values) != 1:
+                raise ValueError
+            os.environ["DEEPSEEK_API_KEY"] = values[0]
+            return True
+    except (UnicodeError, ValueError):
+        raise ValueError("local DeepSeek credential setting is invalid") from None
+    return False
 
 
 @dataclass(frozen=True, slots=True)

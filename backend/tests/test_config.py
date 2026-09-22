@@ -5,12 +5,42 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+import pytest
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from chat_to_howto.config import Settings
+from chat_to_howto.config import Settings, load_deepseek_environment
+
+
+def test_dotenv_loads_only_credential_without_execution_or_overriding_environment(tmp_path, monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("UNRELATED_SETTING", raising=False)
+    (tmp_path / ".env").write_text('export DEEPSEEK_API_KEY="synthetic-$(not-executed)"\nUNRELATED_SETTING=ignored\n')
+    assert load_deepseek_environment(tmp_path) is True
+    assert os.environ["DEEPSEEK_API_KEY"] == "synthetic-$(not-executed)"
+    assert "UNRELATED_SETTING" not in os.environ
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "explicit-process-value")
+    assert load_deepseek_environment(tmp_path) is True
+    assert os.environ["DEEPSEEK_API_KEY"] == "explicit-process-value"
+
+
+@pytest.mark.parametrize("entry", ["", "DEEPSEEK_API_KEY=", 'DEEPSEEK_API_KEY=""', "DEEPSEEK_API_KEY= # not configured"])
+def test_dotenv_empty_credential_is_unconfigured(tmp_path, monkeypatch, entry):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    (tmp_path / ".env").write_text(entry)
+    assert load_deepseek_environment(tmp_path) is False
+    assert not os.getenv("DEEPSEEK_API_KEY")
+
+
+def test_dotenv_invalid_credential_error_does_not_echo_value(tmp_path, monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    (tmp_path / ".env").write_text('DEEPSEEK_API_KEY="synthetic-unclosed-secret')
+    with pytest.raises(ValueError) as failure:
+        load_deepseek_environment(tmp_path)
+    assert str(failure.value) == "local DeepSeek credential setting is invalid"
+    assert not os.getenv("DEEPSEEK_API_KEY")
 
 
 class SettingsTests(unittest.TestCase):

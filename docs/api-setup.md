@@ -6,25 +6,27 @@ P2 的生成编排先依赖通用、可运行时检查的 `LLMProvider` 协议�
 
 DeepSeek 适配器固定调用 `https://api.deepseek.com/chat/completions`，使用 Chat Completions 和 `response_format={"type":"json_object"}`，不假设支持 OpenAI Responses API 或所有 OpenAI 参数。当前本项目配置允许的模型为 `deepseek-v4-flash` 与 `deepseek-v4-pro`。参考的是 DeepSeek 官方 [API 文档](https://api-docs.deepseek.com/)、[创建对话补全](https://api-docs.deepseek.com/api/create-chat-completion/) 和 [价格页](https://api-docs.deepseek.com/quick_start/pricing)。
 
-ChatGPT 订阅不是 DeepSeek API 额度，本项目不会购买额度、创建账号、搜索本机已有 Key，或因为环境里“可能有 Key”就自动调用。真实 Provider 尚未用真实 Key 验证。
+结构化生成显式发送 `thinking={"type":"disabled"}`，不再依赖 Provider 默认思考设置，既有输出上限用于最终 JSON 正文。原/新模式采用相同设置；缓存行为修订已更新。JSON 示例不能替代校验，返回了 200 或 `finish_reason=stop` 也仍须通过严格 JSON、结构和本地引用校验。详见 [官方思考模式说明](https://api-docs.deepseek.com/guides/thinking_mode/)。
+
+ChatGPT 订阅不是 DeepSeek API 额度，本项目不会购买额度、创建账号、搜索本机已有 Key，或因为环境里“可能有 Key”就自动调用。2026-09-20 已按用户授权，用专用聊天完成一次真实 Provider 生成、证据校验及文档导出；这不代表所有输入的语义质量已验收。
 
 ## 配置方式
 
-`runtime-config.json` 是工作区外、权限 `0600` 的非秘密配置。`llm_provider` 设为 `deepseek`，`deepseek_model` 设为上述固定模型之一，`llm_daily_request_limit` 为 1–10000；初始化默认 100。API Key 只在启动进程环境中显式提供：
+`runtime-config.json` 是工作区外、权限 `0600` 的非秘密配置。`llm_provider` 设为 `deepseek`，`deepseek_model` 设为上述固定模型之一，`llm_daily_request_limit` 为 1–10000；初始化默认 100。使用本机编辑器在项目根目录 `.env` 中填写 `DEEPSEEK_API_KEY`。启动时只加载这一项，进程环境已有的非空值优先；空值视为未配置，格式错误返回不含值的错误。加载不会执行 shell、变量替换或读取其他文件。修改 `.env` 后重启服务：
 
 ```sh
-export DEEPSEEK_API_KEY="your-dedicated-key"
 export CHAT_TO_HOWTO_CONFIG="/absolute/private/data/runtime-config.json"
+./scripts/stop_macos.sh # 仅在服务已运行时
 ./scripts/start_macos.sh
 ```
 
-不要把实际值写入 `.env.example`、仓库、命令参数、问题报告或对话。当前实现不会把 DeepSeek Key 持久化到 SQLite 或前端；环境变量由用户负责在本机安全注入。若需要长期凭据管理，应使用专用启动环境或后续实现独立 Keychain 流，而不是提交 `.env`。
+不要把实际值写入 `.env.example`、Git、命令参数、问题报告或对话。`.env` 已被忽略，建议权限为 `0600`。当前实现不会把 DeepSeek Key 持久化到 SQLite、日志或前端；也没有实现 DeepSeek Keychain 管理。
 
 ## 每次外发前会发生什么
 
 1. 本地冻结快照、会话、半开时间范围、主题、模式、排除项、模型、脱敏修订和预算。
 2. 本地做确定性目标脱敏：明显邮箱、中国大陆手机号、带标签的 QQ/微信号、Bearer/API Key 形态会替换。此规则不能保证识别所有个人信息，用户必须查看预览。
-3. 页面显示每个即将作为 `user` 消息发送的完整 UTF-8 JSON 文本块、条数、字符数、最多调用数和输出上限。缓存命中时外发正文为空、请求数为零。
+3. 页面显示原始分块的完整 UTF-8 JSON、条数、字符数、最多调用数和输出上限。新总结方向遇到多块时会额外做一次跨块整合：再次发送同一批脱敏消息及已校验引用的中间提炼，不引入新消息；中间提炼在预览时尚不存在，此项在预览中单独披露并预留预算。超出预算停止，不暗中截断或增加调用。缓存命中时外发正文为空、请求数为零。
 4. 只有用户勾选本次外发确认，后端才签发短期、一次性、会话与内容指纹绑定的授权。范围变化、过期或重放均失败。
 5. 请求还包含固定系统提示，要求只输出结构化 JSON、只引用给定消息标识、不得编造证据。不会发送附件、数据库、来源 Token、DeepSeek Key 或绝对本机路径。
 

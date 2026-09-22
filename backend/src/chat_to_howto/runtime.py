@@ -10,7 +10,7 @@ from pathlib import Path
 import stat
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from chat_to_howto.config import Settings
+from chat_to_howto.config import Settings, load_deepseek_environment
 from chat_to_howto.db import Database
 from chat_to_howto.domain.consent import ConsentRecord, SecretAccessScope
 from chat_to_howto.domain.sources import SourceFingerprint
@@ -100,6 +100,7 @@ def load_runtime_config(path: Path, *, project_root: Path) -> RuntimeConfig:
 
 def create_runtime_app():
     project_root = Path(__file__).resolve().parents[3]
+    load_deepseek_environment(project_root)
     config_value = os.getenv("CHAT_TO_HOWTO_CONFIG")
     config_path = Path(config_value).expanduser() if config_value else _DEFAULT_CONFIG
     runtime = load_runtime_config(config_path, project_root=project_root)
@@ -147,7 +148,7 @@ def create_runtime_app():
     def generation_provider_factory(provider_name: str):
         if provider_name != "deepseek" or provider_name != settings.llm_provider:
             raise ValueError("generation provider is not configured")
-        return DeepSeekProvider.from_environment()
+        return DeepSeekProvider.from_environment(timeout_seconds=180)
 
     return create_app(
         settings=settings,
