@@ -84,12 +84,29 @@ def test_search_can_resolve_opaque_conversation_handles_server_side() -> None:
             "limit": 25,
         },
     )
-
     assert response.status_code == 200, response.json()
     assert resolved[0][1] == "session-a"
     assert service.calls[0][0].conversation_ids == ("internal-conversation-a",)
     assert guards == ["session", "csrf"]
 
+def test_search_from_selections_returns_404_when_resolver_is_unavailable() -> None:
+    client, _, _ = _client()
+
+    response = client.post(
+        "/api/search/from-selections",
+        json={
+            "source_id": "qq",
+            "account_id": "account-a",
+            "query": "safe",
+            "conversation_selection_ids": ["opaque-a"],
+            "start_time": "2026-09-01T00:00:00Z",
+            "end_time": "2026-09-02T00:00:00Z",
+            "limit": 25,
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "selection search is unavailable"
 
 def test_search_post_uses_injected_session_and_csrf() -> None:
     client, service, guards = _client()
