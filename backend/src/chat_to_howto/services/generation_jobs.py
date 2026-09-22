@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from chat_to_howto.api.session import digest
 from chat_to_howto.domain.generation import GenerationResult
+from chat_to_howto.domain.search import SearchResult
 from chat_to_howto.providers.base import (
     CancellationToken,
     LLMProvider,
@@ -48,8 +49,10 @@ from chat_to_howto.services.generation_planning import (
     GenerationScopeBuilder,
     GenerationSelection,
     build_generation_plan,
+    build_synthesis_chunk,
 )
 from chat_to_howto.services.generation_scope import GenerationScope
+from chat_to_howto.services.generation_prompts import topic_prompt
 
 
 GenerationState = Literal[
@@ -76,6 +79,23 @@ message_id and quote; quote must be the complete, exact supplied message text.
 Never invent an id or alter a quote. If evidence is insufficient, use status
 `insufficient_evidence`, title `选定范围内未找到足够依据`, empty factual arrays,
 and an empty evidence array. Do not add summary, background, reasons, or markdown."""
+
+SUMMARY_SYSTEM_PROMPT = """Return JSON only. Summarize the supplied messages, and no other source.
+The top-level JSON object must contain exactly `result` and `evidence`.
+`result` must contain status, title, preparations, steps, checks,
+missing_information, conflicts, and summary. For a complete summary,
+preparations, steps, checks, missing_information, and conflicts must be empty arrays.
+`summary` must contain exactly core_summary, discussions, decisions, action_items,
+open_questions. Each is an array of {text, source_message_ids}; core_summary must
+have at least one item. Include decisions, action items and open questions only
+when explicitly supported by the supplied messages; otherwise leave arrays empty.
+Every summary item must cite actual supplied message IDs. Never infer unsupported
+facts or treat topic-expansion search terms as chat facts. `evidence` must contain
+exactly one {message_id, quote} for every cited ID, where quote is the complete,
+exact supplied message text. Never invent IDs or alter quotes. If evidence is
+insufficient, use status `insufficient_evidence`, title
+`选定范围内未找到足够依据`, empty factual arrays, no summary, and empty evidence.
+Do not add markdown or prose outside the JSON object."""
 
 
 class GenerationAuthorizationError(PermissionError):
@@ -107,12 +127,19 @@ class GenerationPreviewView(BaseModel):
     estimated_input_tokens: int = Field(ge=0)
     max_output_tokens: int = Field(ge=0)
     provider_calls: int = Field(ge=0)
+    synthesis_planned: bool = Field(default=False, exclude_if=lambda value: not value)
     price_status: Literal["unknown"] = "unknown"
     estimated_cost: None = None
     cache_hit: bool
     will_send_external: bool
     outbound_payloads: tuple[str, ...] = Field(repr=False)
     expires_at: datetime
+
+
+class GenerationContextView(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+    messages: tuple[SearchResult, ...]
+    added_count: int = Field(ge=0)
 
 
 class GenerationConsentGrant(BaseModel):
@@ -235,7 +262,7 @@ class GenerationJobOrchestrator:
             character_count=character_count,
             estimated_input_tokens=plan.total_estimated_input_tokens,
             max_output_tokens=plan.total_max_output_tokens,
-            provider_calls=len(plan.chunks),
+            provider_calls=plan.provider_calls,
             cache_hit=cached is not None,
             will_send_external=will_send,
             created_at_utc=now.isoformat(),
@@ -251,13 +278,26 @@ class GenerationJobOrchestrator:
             character_count=character_count,
             estimated_input_tokens=plan.total_estimated_input_tokens,
             max_output_tokens=plan.total_max_output_tokens,
-            provider_calls=len(plan.chunks),
+            provider_calls=plan.provider_calls,
+            synthesis_planned=plan.synthesis_input_tokens > 0,
             cache_hit=cached is not None,
             will_send_external=will_send,
             outbound_payloads=tuple(
                 chunk.payload.decode("utf-8") for chunk in plan.chunks
             ) if will_send else (),
             expires_at=expires,
+        )
+
+    def preview_context(self, selection: GenerationSelection, *, session_id: str) -> GenerationContextView:
+        batch_id, messages, added = self._scope_builder.context_messages(selection, session_id=session_id)
+        return GenerationContextView(
+            messages=tuple(SearchResult(
+                message_id=message.message_id, conversation_id=message.conversation_id,
+                timestamp=message.sent_at_utc, sender_id=message.sender_id,
+                source_order=message.source_order,
+                sender_name=message.sender_name, text=message.text,
+                batch_id=batch_id, snapshot_id=selection.snapshot_id,
+            ) for message in messages), added_count=added,
         )
 
     def issue_consent(
@@ -410,7 +450,7 @@ class GenerationJobOrchestrator:
             plan = build_generation_plan(
                 scope, max_chunk_input_tokens=settings.max_chunk_input_tokens
             )
-            if len(plan.chunks) != int(row["total_chunks"]):
+            if plan.provider_calls != int(row["total_chunks"]):
                 raise GenerationJobConflict("generation plan changed")
             cached = self._cache_get_digest(identity, session_id_digest)
             if cached is not None:
@@ -442,10 +482,16 @@ class GenerationJobOrchestrator:
             if not isinstance(provider, LLMProvider) or provider.name != scope.provider:
                 return self._fail_current(job_id, "provider_unavailable")
             row = self._repository.get_generation_job(job_id)
-            if not self._transition(row, "generating", total_chunks=len(plan.chunks)):
+            if not self._transition(row, "generating", total_chunks=plan.provider_calls):
                 return self._current(job_id)
             extractions: list[StructuredExtraction] = []
-            for index, chunk in enumerate(plan.chunks):
+            for index in range(plan.provider_calls):
+                cancelled = self._cancel_boundary(self._repository.get_generation_job(job_id))
+                if cancelled is not None:
+                    return cancelled
+                is_synthesis = index == len(plan.chunks)
+                chunk = (build_synthesis_chunk(scope, plan, tuple(item.result for item in extractions))
+                         if is_synthesis else plan.chunks[index])
                 token = CancellationToken()
                 request_record_id = f"generation-request:{uuid4().hex}"
                 request_time = self._now()
@@ -471,7 +517,12 @@ class GenerationJobOrchestrator:
                             provider.generate(
                                 ProviderRequest(
                                     model=scope.model,
-                                    system_prompt=SYSTEM_PROMPT,
+                                    system_prompt=(
+                                        topic_prompt(scope.summary_type, synthesis=is_synthesis,
+                                                     draft_limit=plan.max_draft_chars if not is_synthesis else 0)
+                                        if scope.summary_type is not None else
+                                        SUMMARY_SYSTEM_PROMPT if scope.generation_kind == "summary" else SYSTEM_PROMPT
+                                    ),
                                     payload=chunk.payload,
                                     max_output_tokens=scope.budget.max_output_tokens,
                                 ),
@@ -504,9 +555,16 @@ class GenerationJobOrchestrator:
                     return self._current(job_id)
                 if response.finish_reason != "stop":
                     return self._fail_current(job_id, "extraction_incomplete")
-                extractions.append(parse_structured_extraction(chunk, response))
+                extraction = parse_structured_extraction(chunk, response)
+                if scope.summary_type is not None:
+                    self._validate_digest(
+                        merge_extractions((extraction,)),
+                        scope=scope.model_copy(update={"messages": chunk.messages}),
+                        session_digest=session_id_digest,
+                    )
+                extractions.append(extraction)
                 row = self._repository.get_generation_job(job_id)
-                if index + 1 < len(plan.chunks):
+                if index + 1 < plan.provider_calls:
                     if not self._transition(
                         row, "generating", completed_chunks=index + 1
                     ):
@@ -516,7 +574,9 @@ class GenerationJobOrchestrator:
                         row, "merging", completed_chunks=index + 1
                     ):
                         return self._current(job_id)
-            merged = merge_extractions(tuple(extractions))
+            merged = merge_extractions(tuple(extractions[-1:] if plan.synthesis_input_tokens else extractions))
+            if plan.synthesis_input_tokens:
+                merged = merged.model_copy(update={"source_extraction_ids": tuple(item.extraction_id for item in extractions)})
             row = self._repository.get_generation_job(job_id)
             if not self._transition(row, "validating"):
                 return self._current(job_id)

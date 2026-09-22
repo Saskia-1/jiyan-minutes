@@ -10,7 +10,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from chat_to_howto.domain.generation import GenerationBudget, OutboundMessage
+from chat_to_howto.domain.generation import GenerationBudget, OutboundMessage, SummaryType
 
 
 class GenerationScope(BaseModel):
@@ -26,6 +26,9 @@ class GenerationScope(BaseModel):
     snapshot_id: str
     search_run_id: str | None
     mode: Literal["fast", "complete"]
+    generation_kind: Literal["guide", "summary"] = Field(default="guide", exclude_if=lambda value: value == "guide")
+    summary_type: SummaryType | None = Field(default=None, exclude_if=lambda value: value is None)
+    allow_undated: bool = Field(default=False, exclude_if=lambda value: not value)
     topic: str = Field(repr=False)
     provider: str
     model: str
@@ -94,10 +97,14 @@ class GenerationScope(BaseModel):
             "mode": self.mode,
             "topic": self.topic,
             "messages": [
-                {"message_id": item.message_id, "text": item.text}
+                item.model_dump(mode="json")
                 for item in self.messages
             ],
         }
+        if self.generation_kind == "summary":
+            payload["generation_kind"] = "summary"
+        if self.summary_type is not None:
+            payload["summary_type"] = self.summary_type
         return json.dumps(
             payload,
             ensure_ascii=False,

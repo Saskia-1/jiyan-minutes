@@ -13,9 +13,49 @@ from chat_to_howto.services.generation_extraction import (
     parse_structured_extraction,
 )
 from chat_to_howto.services.generation_planning import GenerationChunk
+from chat_to_howto.services.generation_prompts import topic_prompt
 
 
 SENTINEL = "synthetic-provider-private-body"
+
+
+@pytest.mark.parametrize("direction", ["viewpoints", "ideas", "how_to", "mixed"])
+def test_topic_schema_examples_are_valid_and_evidence_is_derived_locally(direction):
+    prompt = topic_prompt(direction)
+    content = prompt.split("不输出任何 JSON 外文本。\n", 1)[1].replace("INPUT_MESSAGE_ID", "m1")
+    assert set(json.loads(content)) == {"result"}
+    chunk = _chunk().model_copy(update={"payload": json.dumps({"summary_type": direction}).encode()})
+    parsed = parse_structured_extraction(chunk, _response(content))
+    assert len(parsed.evidence_quotes) == 1
+    assert parsed.evidence_quotes[0].message_id == "m1"
+    assert parsed.evidence_quotes[0].quote == SENTINEL
+    assert parsed.result.professional_extensions[0].heading == "概念解释"
+
+
+def test_model_cannot_hide_unvalidated_prose_in_user_text():
+    result = _valid_result()
+    result["user_text"] = "模型不能伪装为用户编辑内容"
+    with pytest.raises(ExtractionRejected):
+        parse_structured_extraction(_chunk(), _response(json.dumps({"result": result})))
+
+
+@pytest.mark.parametrize("corruption", ["missing_root_brace", "misplaced_extensions"])
+def test_topic_output_is_never_silently_repaired_or_relaxed(corruption):
+    payload = {"result": {
+        "status": "complete", "title": "合成音乐构思", "preparations": [], "steps": [],
+        "checks": [], "missing_information": [], "conflicts": [],
+        "professional_extensions": [{"heading": "概念解释", "text": "仅作为额外解释"}],
+        "summary": {"summary_type": "ideas", "sections": [{"heading": "场景歌单",
+            "text": "用收藏筛选跑步歌曲", "source_message_ids": ["m1"]}]},
+    }}
+    if corruption == "misplaced_extensions":
+        payload["result"]["summary"]["professional_extensions"] = payload["result"].pop("professional_extensions")
+    content = json.dumps(payload)
+    if corruption == "missing_root_brace":
+        content = content[:-1]
+    chunk = _chunk().model_copy(update={"payload": b'{"summary_type":"ideas"}'})
+    with pytest.raises(ExtractionRejected):
+        parse_structured_extraction(chunk, _response(content))
 
 
 def _chunk(*, index: int = 0) -> GenerationChunk:

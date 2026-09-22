@@ -30,6 +30,76 @@ CHAT_TEXT = "synthetic target instruction"
 OUTSIDE_CHAT_TEXT = "synthetic instruction outside generation time"
 
 
+@pytest.mark.parametrize("summary_type", ["viewpoints", "ideas", "how_to", "mixed"])
+def test_topic_directions_share_chunk_synthesis_evidence_and_cache(tmp_path, summary_type):
+    repository, _ = _repository_with_snapshot(tmp_path)
+    provider = FakeProvider()
+    settings = _cache_settings().model_copy(update={"max_chunk_input_tokens": 240})
+    orchestrator = GenerationJobOrchestrator(
+        repository=repository, provider_factory=lambda _: provider,
+        cache_settings=settings, clock=lambda: NOW,
+    )
+    selection = GenerationSelection.model_validate({
+        **_selection().model_dump(), "summary_type": summary_type,
+        "end_time": datetime(2026, 9, 3, tzinfo=UTC),
+    })
+    try:
+        preview = orchestrator.create_preview(selection, session_id="session-a")
+        assert preview.synthesis_planned is True
+        assert preview.provider_calls == 3
+        consent = orchestrator.issue_consent(preview.preview_id, session_id="session-a", confirmed=True)
+        job = orchestrator.start_job(consent.consent_id, session_id="session-a", idempotency_key="topic-test")
+        completed = orchestrator.run_job(job.job_id)
+        assert completed.state == "complete", completed.error_code
+        assert provider.call_count == 3
+        synthesis = json.loads(provider.request_payloads[-1])
+        assert synthesis["operation"] == "synthesize"
+        assert len(synthesis["drafts"]) == 2
+        assert len(synthesis["messages"]) == 2
+        assert len(completed.result.evidence) == 2
+        if summary_type == "how_to":
+            assert completed.result.result.summary is None
+            assert completed.result.result.steps
+        else:
+            assert completed.result.result.summary.summary_type == summary_type
+            assert completed.result.result.summary.sections[0].source_message_ids
+        cached = orchestrator.create_preview(selection, session_id="session-a")
+        assert cached.cache_hit is True
+        other = selection.model_copy(update={"summary_type": "ideas" if summary_type != "ideas" else "viewpoints"})
+        assert not orchestrator.create_preview(other, session_id="session-a").cache_hit
+    finally:
+        repository.close()
+
+
+@pytest.mark.parametrize("attack,error_code", [("wrong_direction", "evidence_invalid"), ("unknown_id", "extraction_invalid"), ("rewritten_quote", "extraction_invalid")])
+def test_topic_extraction_rejects_invalid_direction_or_model_written_evidence(tmp_path, attack, error_code):
+    class AttackingFake(FakeProvider):
+        async def generate(self, request, cancellation):
+            response = await super().generate(request, cancellation)
+            value = json.loads(response.content)
+            if attack == "wrong_direction":
+                value["result"]["summary"]["summary_type"] = "viewpoints"
+            elif attack == "unknown_id":
+                value["result"]["summary"]["sections"][0]["source_message_ids"] = ["unknown-message"]
+            else:
+                value["evidence"] = [{"message_id": "m1", "quote": "rewritten by the model"}]
+            return response.model_copy(update={"content": json.dumps(value)})
+    repository, _ = _repository_with_snapshot(tmp_path)
+    provider = AttackingFake()
+    orchestrator = _orchestrator(repository, provider)
+    try:
+        preview = orchestrator.create_preview(_selection().model_copy(update={"summary_type": "ideas"}), session_id="session-a")
+        consent = orchestrator.issue_consent(preview.preview_id, session_id="session-a", confirmed=True)
+        job = orchestrator.start_job(consent.consent_id, session_id="session-a", idempotency_key="invalid-topic")
+        failed = orchestrator.run_job(job.job_id)
+        assert failed.state == "failed"
+        assert failed.error_code == error_code
+        assert failed.result is None
+        assert provider.call_count == 1
+    finally:
+        repository.close()
+
+
 def _repository_with_snapshot(tmp_path) -> tuple[ChatRepository, str]:
     repository = ChatRepository(tmp_path / "chat.sqlite3")
     export_scope = ExportScope(

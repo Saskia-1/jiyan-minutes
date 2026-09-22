@@ -6,13 +6,14 @@ from datetime import datetime, timezone
 
 import pytest
 
-from chat_to_howto.domain.generation import GenerationBudget, OutboundMessage
+from chat_to_howto.domain.generation import GenerationBudget, GenerationResult, OutboundMessage, TopicSummary, TopicSection
 from chat_to_howto.domain.messages import MessageInput, StoredMessage
 from chat_to_howto.services.generation_planning import (
     GenerationBudgetExceeded,
     GenerationScopeBuilder,
     GenerationSelection,
     build_generation_plan,
+    build_synthesis_chunk,
     estimate_chunk_tokens,
 )
 from chat_to_howto.services.generation_scope import GenerationScope
@@ -25,7 +26,7 @@ def _stored(
     source_message_id: str,
     *,
     conversation_id: str = "conversation-a",
-    sent_at: datetime,
+    sent_at: datetime | None,
     text: str | None,
     source_order: int = 0,
 ) -> StoredMessage:
@@ -39,7 +40,7 @@ def _stored(
             page_slice_id=None,
             source_order=source_order,
             sent_at_utc=sent_at,
-            original_timestamp=sent_at.isoformat(),
+            original_timestamp=sent_at.isoformat() if sent_at else None,
             text=text,
         )
     )
@@ -104,6 +105,38 @@ def _scope(messages: tuple[OutboundMessage, ...], **changes: object) -> Generati
     }
     values.update(changes)
     return GenerationScope(**values)
+
+
+def test_summary_scope_uses_only_recalled_ids_and_keeps_source_order_after_exclusion() -> None:
+    early = _stored("summary-early", sent_at=datetime(2026, 9, 1, 1, tzinfo=UTC), text="秋招开始")
+    late = _stored("summary-late", sent_at=datetime(2026, 9, 1, 2, tzinfo=UTC), text="面试安排")
+    irrelevant = _stored("summary-other", sent_at=datetime(2026, 9, 1, 3, tzinfo=UTC), text="无关")
+    excluded = _stored("summary-excluded", sent_at=datetime(2026, 9, 1, 4, tzinfo=UTC), text="实习闲聊")
+    repository = SnapshotRepositoryStub((late, irrelevant, excluded, early))
+
+    scope = GenerationScopeBuilder(repository).build(
+        _selection(
+            topic="就业", generation_kind="summary",
+            included_message_ids=(late.message_id, excluded.message_id, early.message_id),
+            excluded_message_ids=(excluded.message_id,),
+        ),
+        session_id="local-session",
+    )
+
+    assert scope.generation_kind == "summary"
+    assert tuple(item.message_id for item in scope.messages) == (early.message_id, late.message_id)
+    assert all("就业" not in item.text for item in scope.messages)
+
+
+def test_summary_rejects_recalled_ids_outside_selected_scope() -> None:
+    message = _stored("summary-in-scope", sent_at=datetime(2026, 9, 1, 1, tzinfo=UTC), text="求职")
+    repository = SnapshotRepositoryStub((message,))
+
+    with pytest.raises(ValueError, match="recalled"):
+        GenerationScopeBuilder(repository).build(
+            _selection(generation_kind="summary", included_message_ids=("unknown-id",)),
+            session_id="local-session",
+        )
 
 
 def test_scope_builder_intersects_owned_snapshot_conversation_time_and_exclusions() -> None:
@@ -279,3 +312,77 @@ def test_empty_scope_needs_no_provider_call() -> None:
     assert plan.chunks == ()
     assert plan.total_estimated_input_tokens == 0
     assert plan.total_max_output_tokens == 0
+
+
+def test_context_completes_short_gaps_without_expanding_unbounded_conversation():
+    messages = tuple(_stored(f"gap-{i}", sent_at=None, text=f"part {i}", source_order=i) for i in range(50))
+    builder = GenerationScopeBuilder(SnapshotRepositoryStub(messages))
+    selection = _selection(summary_type="ideas", allow_undated=True, included_message_ids=(messages[0].message_id, messages[24].message_id))
+    _, expanded, _ = builder.context_messages(selection, session_id="session-a")
+    assert [item.message_id for item in expanded] == [item.message_id for item in messages[:31]]
+    selection = selection.model_copy(update={"included_message_ids": (messages[0].message_id, messages[40].message_id)})
+    _, expanded, _ = builder.context_messages(selection, session_id="session-a")
+    assert messages[20].message_id not in {item.message_id for item in expanded}
+
+
+def test_context_is_bounded_to_neighbours_conversation_and_time_then_can_be_excluded():
+    messages = tuple(_stored(f"context-{i}", sent_at=datetime(2026, 9, 1, i, tzinfo=UTC),
+                             text=f"context {i}", source_order=i) for i in range(8))
+    other = _stored("other", conversation_id="conversation-b", sent_at=datetime(2026, 9, 1, 4, tzinfo=UTC), text="private other")
+    boundary = _stored("boundary", sent_at=datetime(2026, 9, 3, tzinfo=UTC), text="outside time")
+    builder = GenerationScopeBuilder(SnapshotRepositoryStub((*reversed(messages), other, boundary)))
+    selection = _selection(summary_type="ideas", included_message_ids=(messages[4].message_id,))
+    _, expanded, added = builder.context_messages(selection, session_id="session-a")
+    assert expanded == messages
+    assert added == 7
+    confirmed = selection.model_copy(update={
+        "included_message_ids": tuple(item.message_id for item in expanded),
+        "excluded_message_ids": (messages[3].message_id,),
+    })
+    scope = builder.build(confirmed, session_id="session-a")
+    assert [item.message_id for item in scope.messages] == [messages[i].message_id for i in (0, 1, 2, 4, 5, 6, 7)]
+    assert all(item.speaker and item.conversation for item in scope.messages)
+    with pytest.raises(ValueError, match="context seeds"):
+        builder.context_messages(selection.model_copy(update={"included_message_ids": (other.message_id,)}), session_id="session-a")
+
+
+def test_undated_messages_require_explicit_internal_opt_in_and_keep_source_order():
+    first = _stored("first", sent_at=datetime(2026, 9, 1, tzinfo=UTC), text="first", source_order=1).model_copy(update={"sent_at_utc": None, "original_timestamp": None})
+    second = first.model_copy(update={"message_id": "undated-second", "text": "second", "source_order": 2})
+    builder = GenerationScopeBuilder(SnapshotRepositoryStub((second, first)))
+    selected = _selection(summary_type="ideas", included_message_ids=(second.message_id, first.message_id))
+    with pytest.raises(ValueError, match="recalled"):
+        builder.build(selected, session_id="session-a")
+    scope = builder.build(selected.model_copy(update={"allow_undated": True}), session_id="session-a")
+    assert [item.message_id for item in scope.messages] == [first.message_id, second.message_id]
+    with pytest.raises(ValueError, match="explicit message IDs"):
+        _selection(allow_undated=True)
+
+
+def test_new_direction_reserves_synthesis_call_and_rejects_budget_overflow():
+    messages = tuple(OutboundMessage(message_id=f"m{i}", text="x" * 80) for i in range(2))
+    scope = _scope(messages, summary_type="ideas")
+    limit = estimate_chunk_tokens(scope.topic, messages[:1], summary_type="ideas")
+    plan = build_generation_plan(scope, max_chunk_input_tokens=limit)
+    assert plan.provider_calls == 3
+    assert plan.synthesis_input_tokens > 0
+    assert plan.total_estimated_input_tokens > sum(chunk.estimated_input_tokens for chunk in plan.chunks)
+    smaller = scope.model_copy(update={"budget": scope.budget.model_copy(update={"max_provider_calls": 2})})
+    with pytest.raises(GenerationBudgetExceeded, match="provider call"):
+        build_generation_plan(smaller, max_chunk_input_tokens=limit)
+
+
+def test_synthesis_reserves_room_for_citation_rich_drafts_without_truncating():
+    messages = tuple(OutboundMessage(message_id=f"m{i}", text="x" * 80) for i in range(2))
+    scope = _scope(messages, summary_type="ideas", budget=GenerationBudget(
+        max_messages=20, max_input_tokens=100_000, max_provider_calls=5, max_output_tokens=4_000))
+    plan = build_generation_plan(scope, max_chunk_input_tokens=estimate_chunk_tokens("target", messages[:1], summary_type="ideas"))
+    draft = GenerationResult(status="complete", title="synthetic", preparations=(), steps=(), checks=(),
+        missing_information=(), conflicts=(), summary=TopicSummary(summary_type="ideas", sections=(
+            TopicSection(heading="完整构思", text="x" * 7_000, source_message_ids=("m0",)),)))
+    synthesis = build_synthesis_chunk(scope, plan, (draft, draft))
+    assert synthesis.estimated_input_tokens <= plan.synthesis_input_tokens
+    oversized = draft.model_copy(update={"summary": TopicSummary(summary_type="ideas", sections=(
+        TopicSection(heading="oversized", text="x" * 13_000, source_message_ids=("m0",)),))})
+    with pytest.raises(GenerationBudgetExceeded, match="intermediate draft"):
+        build_synthesis_chunk(scope, plan, (oversized, draft))

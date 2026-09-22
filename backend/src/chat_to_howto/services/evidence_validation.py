@@ -8,7 +8,7 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from chat_to_howto.api.session import digest
-from chat_to_howto.domain.generation import GenerationResult
+from chat_to_howto.domain.generation import GenerationResult, TopicSummary, summary_groups
 from chat_to_howto.domain.messages import StoredMessage
 from chat_to_howto.services.generation_merge import MergedGeneration
 from chat_to_howto.services.generation_scope import GenerationScope
@@ -24,7 +24,7 @@ class ValidatedEvidence(BaseModel):
 
     message_id: str
     conversation_id: str
-    timestamp: datetime
+    timestamp: datetime | None
     sender_id: str | None
     sender_name: str | None
     quote: str = Field(repr=False)
@@ -88,8 +88,21 @@ class EvidenceValidator:
         if batch_id != scope.batch_id:
             raise EvidenceValidationRejected("Evidence scope identity mismatch.")
         snapshot_by_id = {message.message_id: message for message in snapshot_messages}
+        if merged.result.user_text is not None:
+            raise EvidenceValidationRejected("Generated content cannot claim user authorship.")
         allowed_conversations = set(scope.conversation_ids)
         scope_by_id = {message.message_id: message for message in scope.messages}
+        if scope.summary_type is not None and merged.result.status == "complete":
+            summary = merged.result.summary
+            if ((scope.summary_type == "how_to" and summary is not None)
+                or (scope.summary_type != "how_to" and (
+                    not isinstance(summary, TopicSummary) or summary.summary_type != scope.summary_type
+                ))):
+                raise EvidenceValidationRejected("Generation direction does not match the frozen scope.")
+
+        def within_range(stored: StoredMessage) -> bool:
+            return (scope.allow_undated if stored.sent_at_utc is None
+                    else scope.range_start <= stored.sent_at_utc < scope.range_end)
 
         for outbound in scope.messages:
             stored = snapshot_by_id.get(outbound.message_id)
@@ -97,8 +110,7 @@ class EvidenceValidator:
                 raise EvidenceValidationRejected("Evidence scope message is missing.")
             if (
                 stored.conversation_id not in allowed_conversations
-                or stored.sent_at_utc is None
-                or not scope.range_start <= stored.sent_at_utc < scope.range_end
+                or not within_range(stored)
                 or stored.text is None
                 or redact_outbound_text(
                     stored.text, policy_revision=scope.redaction_policy_revision
@@ -133,8 +145,7 @@ class EvidenceValidator:
                 raise EvidenceValidationRejected("Evidence quote does not match local content.")
             if (
                 stored.conversation_id not in allowed_conversations
-                or stored.sent_at_utc is None
-                or not scope.range_start <= stored.sent_at_utc < scope.range_end
+                or not within_range(stored)
             ):
                 raise EvidenceValidationRejected("Referenced evidence is outside the allowed scope.")
             validated.append(
@@ -159,6 +170,10 @@ class EvidenceValidator:
 
 def _referenced_message_ids(result: GenerationResult) -> tuple[str, ...]:
     ordered: list[str] = []
+    if result.summary is not None:
+        for _label, items in summary_groups(result.summary):
+            for item in items:
+                ordered.extend(item.source_message_ids)
     for item in (*result.preparations, *result.steps, *result.checks):
         ordered.extend(item.source_message_ids)
     for conflict in result.conflicts:

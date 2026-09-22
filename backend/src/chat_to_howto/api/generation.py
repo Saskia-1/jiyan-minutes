@@ -11,6 +11,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Path, st
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from chat_to_howto.api.export_jobs import SafeValidationRoute
+from chat_to_howto.domain.generation import SummaryType
 from chat_to_howto.services.generation_jobs import (
     GenerationAuthorizationError,
     GenerationConsentGrant,
@@ -19,11 +20,13 @@ from chat_to_howto.services.generation_jobs import (
     GenerationJobOrchestrator,
     GenerationJobView,
     GenerationPreviewView,
+    GenerationContextView,
 )
 from chat_to_howto.services.generation_planning import (
     GenerationBudgetExceeded,
     GenerationSelection,
 )
+from chat_to_howto.services.topic_expansion import TopicExpansionService, TopicExpansionView
 
 
 _OPAQUE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
@@ -43,6 +46,10 @@ class SelectionGenerationRequest(_Request):
     end_time: datetime
     topic: str = Field(min_length=1, max_length=512, repr=False)
     mode: Literal["fast", "complete"]
+    generation_kind: Literal["guide", "summary"] = "guide"
+    summary_type: SummaryType | None = None
+    include_undated: bool = False
+    included_message_ids: tuple[str, ...] = Field(default=(), max_length=2_000)
     excluded_message_ids: tuple[str, ...] = Field(default=(), max_length=2_000)
 
     @field_validator("conversation_selection_ids", mode="before")
@@ -61,14 +68,14 @@ class SelectionGenerationRequest(_Request):
             raise ValueError("selection handles must be unique opaque values")
         return value
 
-    @field_validator("excluded_message_ids", mode="before")
+    @field_validator("excluded_message_ids", "included_message_ids", mode="before")
     @classmethod
     def _parse_excluded_message_ids(cls, value: object) -> object:
         if isinstance(value, list) and len(value) <= 2_000:
             return tuple(value)
         return value
 
-    @field_validator("excluded_message_ids")
+    @field_validator("excluded_message_ids", "included_message_ids")
     @classmethod
     def _validate_excluded_message_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         if len(set(value)) != len(value) or any(
@@ -117,9 +124,14 @@ class EmptyGenerationMutation(_Request):
     pass
 
 
+class TopicExpansionRequest(_Request):
+    topic: str = Field(min_length=1, max_length=512, repr=False)
+
+
 def create_generation_router(
     *,
     get_orchestrator: Callable[[], GenerationJobOrchestrator],
+    get_topic_expansion: Callable[[], TopicExpansionService],
     require_session: Callable[[], str],
     require_csrf: Callable[[], object],
     resolve_selection: Callable[[SelectionGenerationRequest, str], GenerationSelection],
@@ -129,6 +141,32 @@ def create_generation_router(
         tags=["generation"],
         route_class=SafeValidationRoute,
     )
+
+    @router.post("/topic-expansion", response_model=TopicExpansionView)
+    def expand_topic(
+        request: TopicExpansionRequest,
+        service: TopicExpansionService = Depends(get_topic_expansion),
+        _session_id: str = Depends(require_session),
+        _csrf: object = Depends(require_csrf),
+    ) -> TopicExpansionView:
+        try:
+            return service.expand(request.topic)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="invalid topic") from None
+
+    @router.post(
+        "/contexts/from-selections", response_model=GenerationContextView,
+    )
+    def preview_context(
+        request: SelectionGenerationRequest,
+        service: GenerationJobOrchestrator = Depends(get_orchestrator),
+        session_id: str = Depends(require_session),
+        _csrf: object = Depends(require_csrf),
+    ) -> GenerationContextView:
+        try:
+            return service.preview_context(resolve_selection(request, session_id), session_id=session_id)
+        except Exception as error:
+            raise _http_error(error) from None
 
     @router.post(
         "/previews/from-selections",

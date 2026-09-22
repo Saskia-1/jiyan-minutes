@@ -136,6 +136,36 @@ def test_complete_result_requires_at_least_one_action_step() -> None:
         GenerationResult.model_validate(payload)
 
 
+def test_structured_summary_can_omit_empty_sections_but_every_item_has_evidence() -> None:
+    payload = {
+        "status": "complete", "title": "就业聊天总结",
+        "preparations": [], "steps": [], "checks": [],
+        "missing_information": [], "conflicts": [],
+        "summary": {
+            "core_summary": [{"text": "讨论了求职安排", "source_message_ids": ["m1"]}],
+            "discussions": [], "decisions": [], "action_items": [], "open_questions": [],
+        },
+    }
+
+    result = GenerationResult.model_validate(payload)
+
+    assert result.summary.core_summary[0].source_message_ids == ("m1",)
+    assert result.model_dump(mode="json")["summary"] == payload["summary"]
+    payload["summary"]["core_summary"][0]["source_message_ids"] = []
+    with pytest.raises(ValidationError):
+        GenerationResult.model_validate(payload)
+
+
+def test_summary_cannot_smuggle_guide_steps_or_empty_unsupported_claims() -> None:
+    payload = _valid_result()
+    payload["summary"] = {
+        "core_summary": [{"text": "核心", "source_message_ids": ["m1"]}],
+        "discussions": [], "decisions": [], "action_items": [], "open_questions": [],
+    }
+    with pytest.raises(ValidationError):
+        GenerationResult.model_validate(payload)
+
+
 def test_unresolved_conflict_retains_both_claims_and_evidence() -> None:
     conflict = Conflict(
         description="导出范围不一致",

@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from chat_to_howto.domain.generation import GenerationBudget, OutboundMessage
+from chat_to_howto.domain.generation import GenerationBudget, GenerationResult, OutboundMessage
 from chat_to_howto.domain.messages import MessageInput, StoredMessage
 from chat_to_howto.providers.base import ProviderResponse
 from chat_to_howto.services.evidence_validation import (
@@ -159,6 +159,28 @@ def test_valid_evidence_is_rehydrated_from_local_snapshot_and_marked_verified() 
     assert verified.evidence[0].quote == SENTINEL
     assert verified.evidence[0].conversation_id == "conversation-a"
     assert verified.snapshot_id == "snapshot-a"
+
+
+def test_summary_citation_rehydrates_original_sender_time_and_body() -> None:
+    merged = _merged(ALLOWED.message_id, SENTINEL)
+    result = GenerationResult.model_validate({
+        "status": "complete", "title": "Synthetic summary",
+        "preparations": [], "steps": [], "checks": [],
+        "missing_information": [], "conflicts": [],
+        "summary": {
+            "core_summary": [{"text": "Cited conclusion", "source_message_ids": [ALLOWED.message_id]}],
+            "discussions": [], "decisions": [], "action_items": [], "open_questions": [],
+        },
+    })
+
+    verified = EvidenceValidator(EvidenceRepositoryStub()).validate(
+        merged.model_copy(update={"result": result}),
+        scope=_scope(generation_kind="summary"), session_id="session-a",
+    )
+
+    assert verified.evidence[0].sender_name == "Synthetic Sender"
+    assert verified.evidence[0].timestamp == datetime(2026, 9, 1, 1, tzinfo=UTC)
+    assert verified.evidence[0].quote == SENTINEL
 
 
 @pytest.mark.parametrize(

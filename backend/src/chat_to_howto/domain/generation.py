@@ -6,6 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+SummaryType = Literal["viewpoints", "ideas", "how_to", "mixed"]
 
 class _FrozenModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
@@ -41,6 +42,53 @@ class Check(_EvidenceItem):
     text: str = Field(min_length=1)
 
 
+class SummaryItem(_EvidenceItem):
+    text: str = Field(min_length=1)
+
+
+class SummaryContent(_FrozenModel):
+    """Compatibility shape for documents created by the first summary release."""
+    core_summary: tuple[SummaryItem, ...]
+    discussions: tuple[SummaryItem, ...]
+    decisions: tuple[SummaryItem, ...]
+    action_items: tuple[SummaryItem, ...]
+    open_questions: tuple[SummaryItem, ...]
+
+
+class TopicSection(_EvidenceItem):
+    heading: str = Field(min_length=1, max_length=200)
+    text: str = Field(min_length=1, max_length=16_000)
+
+    @field_validator("heading", "text")
+    @classmethod
+    def _nonblank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("topic section must be nonblank")
+        return value
+
+
+class TopicSummary(_FrozenModel):
+    summary_type: Literal["viewpoints", "ideas", "mixed"]
+    sections: tuple[TopicSection, ...] = Field(min_length=1, max_length=40)
+
+
+class ProfessionalExtension(_FrozenModel):
+    """Clearly separate model explanation from cited source claims."""
+    heading: str = Field(min_length=1, max_length=200)
+    text: str = Field(min_length=1, max_length=8_000)
+
+
+def summary_groups(summary: SummaryContent | TopicSummary):
+    """Natural sections for new documents; retain old saved documents verbatim."""
+    if isinstance(summary, TopicSummary):
+        return tuple((section.heading, (section,)) for section in summary.sections)
+    return tuple((label, getattr(summary, field)) for field, label in (
+        ("core_summary", "核心摘要"), ("discussions", "主要信息与讨论"),
+        ("decisions", "结论与决定"), ("action_items", "待办事项"),
+        ("open_questions", "尚未解决的问题"),
+    ))
+
+
 class Conflict(_FrozenModel):
     description: str = Field(min_length=1)
     claim_a: str = Field(min_length=1)
@@ -70,7 +118,7 @@ class Conflict(_FrozenModel):
 
 
 class GenerationResult(_FrozenModel):
-    """Only execution content; no background/reason/summary fields exist."""
+    """Evidence-backed guide or separate structured chat summary."""
 
     status: Literal["complete", "insufficient_evidence"]
     title: str = Field(min_length=1)
@@ -79,14 +127,21 @@ class GenerationResult(_FrozenModel):
     checks: tuple[Check, ...]
     missing_information: tuple[str, ...]
     conflicts: tuple[Conflict, ...]
+    summary: TopicSummary | SummaryContent | None = Field(default=None, exclude_if=lambda value: value is None)
+    professional_extensions: tuple[ProfessionalExtension, ...] = Field(default=(), max_length=12, exclude_if=lambda value: not value)
+    user_text: str | None = Field(default=None, min_length=1, max_length=100_000, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def _validate_status_content(self) -> "GenerationResult":
         if self.status == "insufficient_evidence":
-            if self.title != "选定范围内未找到足够依据":
+            if self.user_text is None and self.title != "选定范围内未找到足够依据":
                 raise ValueError("insufficient evidence must use the fixed local message")
-            if self.preparations or self.steps or self.checks or self.conflicts:
+            if self.preparations or self.steps or self.checks or self.conflicts or self.summary or self.professional_extensions:
                 raise ValueError("insufficient evidence cannot contain factual items")
+        elif self.summary is not None:
+            if ((isinstance(self.summary, SummaryContent) and not self.summary.core_summary) or self.preparations or self.steps
+                or self.checks or self.missing_information or self.conflicts):
+                raise ValueError("summary requires cited core content and no guide fields")
         elif not self.steps:
             raise ValueError("a complete how-to requires at least one step")
         return self
@@ -109,6 +164,8 @@ class OutboundMessage(_FrozenModel):
 
     message_id: str = Field(min_length=1)
     text: str = Field(min_length=1, repr=False)
+    speaker: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    conversation: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @field_validator("message_id", "text")
     @classmethod

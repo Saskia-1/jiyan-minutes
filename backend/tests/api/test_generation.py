@@ -43,3 +43,15 @@ def test_generation_request_rejects_unbounded_duplicate_or_malformed_exclusions(
 ) -> None:
     with pytest.raises(ValidationError):
         _request(excluded_message_ids)
+
+
+def test_topic_expansion_falls_back_to_original_term_when_provider_unavailable(p0) -> None:
+    p0.start()
+    p0.bootstrap()
+
+    response = p0.request(
+        "POST", "/api/generation/topic-expansion", json={"topic": "就业"}
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"topic": "就业", "terms": ["就业"], "degraded": True}

@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import type { LocalApiClient } from "../../api/client";
-import type { ChatSourceId, GenerationJob, GenerationPreview, ValidatedGeneration } from "../../types";
+import type { ChatSourceId, GenerationJob, GenerationPreview, GenerationSelectionRequest, SummaryType, ValidatedGeneration } from "../../types";
 import { DocumentEditor } from "../documents/DocumentEditor";
+import { EvidenceDrawer } from "../documents/EvidenceDrawer";
 
 const TERMINAL = new Set(["complete", "failed", "cancelled"]);
+const DIRECTION_LABELS: Record<SummaryType, string> = {
+  viewpoints: "观点", ideas: "Idea / 想法", how_to: "方法论 / 怎么做", mixed: "综合总结",
+};
 const STATE_LABELS: Record<GenerationJob["state"], string> = {
   pending: "等待执行", checking_cache: "正在检查本地缓存", generating: "AI 正在生成",
   extracting: "正在校验输出结构", merging: "正在合并分块", validating: "正在核对本地证据",
@@ -23,19 +27,46 @@ interface Props {
   outputRootId?: string;
   disabled: boolean;
   onScopeLockChange?: (locked: boolean) => void;
+  retrievalTopic?: string;
+  includedMessageIds?: string[];
+  compact?: boolean;
+  direction?: SummaryType;
+  prepareSelection?: () => Promise<GenerationSelectionRequest>;
+  editRequested?: boolean;
+  onEditRequestedChange?: (value: boolean) => void;
+  onComplete?: (jobId: string) => void;
 }
 
-function safeDate(value: string) {
+function safeDate(value: string | null) {
+  if (value === null) return "时间未知";
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? new Date(parsed).toLocaleString("zh-CN") : value;
 }
 
-function ResultView({ value }: { value: ValidatedGeneration }) {
+export function ResultView({ value, verified = true }: { value: Pick<ValidatedGeneration, "result" | "evidence">; verified?: boolean }) {
   const result = value.result;
+  const topicSummary = result.summary && "sections" in result.summary ? result.summary : null;
+  const legacySummary = result.summary && "core_summary" in result.summary ? result.summary : null;
+  const summarySections = legacySummary ? ([
+    ["core_summary", "核心摘要"], ["discussions", "主要信息与讨论"],
+    ["decisions", "结论与决定"], ["action_items", "待办事项"],
+    ["open_questions", "尚未解决的问题"],
+  ] as const) : [];
   return <section className="generation-result" aria-label="AI 生成结果">
-    <p className="verified-badge">AI 生成 · 本地证据已验证</p>
+    {verified && <p className="verified-badge">AI 生成 · 本地证据已验证</p>}
     <h4>{result.title}</h4>
-    {result.status === "insufficient_evidence" ? <p>选定范围内未找到足够依据；未生成推测性步骤。</p> : <>
+    {result.user_text != null ? <div className="topic-prose">{result.user_text}</div> : result.status === "insufficient_evidence" ? <p>选定范围内未找到足够依据；未生成推测内容。</p> : topicSummary ? <>
+      {topicSummary.sections.map((section, index) => <section key={index} className="topic-section">
+        <h5>{section.heading}</h5><p className="topic-prose">{section.text}</p>
+        <EvidenceDrawer label="查看原始依据" evidence={value.evidence.filter(item => section.source_message_ids.includes(item.message_id))} />
+      </section>)}
+    </> : legacySummary ? <>
+      {summarySections.map(([field, label]) => !!legacySummary[field].length &&
+        <section key={field}><h5>{label}</h5><ul>{legacySummary[field].map((item, index) =>
+          <li key={`${field}-${index}`}><p>{item.text}</p>
+            <EvidenceDrawer evidence={value.evidence.filter(evidence => item.source_message_ids.includes(evidence.message_id))} />
+          </li>)}</ul></section>)}
+    </> : <>
       {!!result.preparations.length && <section><h5>准备</h5><ul>{result.preparations.map((item, index) =>
         <li key={`${item.text}-${index}`}>{item.text}</li>)}</ul></section>}
       <section><h5>步骤</h5><ol>{result.steps.map((step, index) => <li key={`${step.instruction}-${index}`}>
@@ -45,7 +76,7 @@ function ResultView({ value }: { value: ValidatedGeneration }) {
         {!!step.conditions.length && <p>条件：{step.conditions.join("、")}</p>}
         {!!step.warnings.length && <p className="warning">注意：{step.warnings.join("、")}</p>}
         {step.expected_result && <p>预期结果：{step.expected_result}</p>}
-        <small>证据引用：{step.source_message_ids.length} 条</small>
+        <EvidenceDrawer label="查看原始依据" evidence={value.evidence.filter(item => step.source_message_ids.includes(item.message_id))} />
       </li>)}</ol></section>
       {!!result.checks.length && <section><h5>检查</h5><ul>{result.checks.map((item, index) =>
         <li key={`${item.text}-${index}`}>{item.text}</li>)}</ul></section>}
@@ -55,11 +86,14 @@ function ResultView({ value }: { value: ValidatedGeneration }) {
         <p>{item.resolution ? `已解析：${item.resolution}` : "尚未解析"}</p>
       </article>)}</section>}
     </>}
-    <details><summary>查看已验证证据（{value.evidence.length} 条）</summary>
+    {result.user_text == null && result.professional_extensions?.map((item, index) => <section className="professional-extension" key={index}>
+      <h5>专业补充 · {item.heading}</h5><p className="muted">AI 提供的延伸解释，不代表原聊天。</p><p className="topic-prose">{item.text}</p>
+    </section>)}
+    <details><summary>查看原始依据（{value.evidence.length} 条）</summary>
       <section aria-label="已验证证据" className="validated-evidence"><ol>{value.evidence.map(item => <li key={item.message_id}>
         <div className="result-meta"><strong>{item.sender_name || item.sender_id || "未知发送者"}</strong>
-          <time dateTime={item.timestamp}>{safeDate(item.timestamp)}</time></div>
-        <p>{item.quote}</p><small>{item.conversation_id} · {item.message_id}</small>
+          <time dateTime={item.timestamp || undefined}>{safeDate(item.timestamp)}</time></div>
+        <p>{item.quote}</p>
       </li>)}</ol></section>
     </details>
   </section>;
@@ -68,6 +102,10 @@ function ResultView({ value }: { value: ValidatedGeneration }) {
 export function GenerationPanel(props: Props) {
   const [topic, setTopic] = useState("");
   const [mode, setMode] = useState<"fast" | "complete">("complete");
+  const [summaryType, setSummaryType] = useState<SummaryType>("how_to");
+  const hasRetrievedScope = props.retrievalTopic !== undefined;
+  const topicValue = hasRetrievedScope ? props.retrievalTopic || "" : topic;
+  const generationMode = hasRetrievedScope ? "complete" : mode;
   const [preview, setPreview] = useState<GenerationPreview | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [job, setJob] = useState<GenerationJob | null>(null);
@@ -76,12 +114,14 @@ export function GenerationPanel(props: Props) {
   const alive = useRef(true);
   const scopeKey = JSON.stringify([
     props.sourceId, props.account, props.snapshotId, props.rangeStart, props.rangeEnd,
-    props.conversationSelectionIds, props.excludedMessageIds, topic.trim(), mode,
+    props.conversationSelectionIds, props.excludedMessageIds, topicValue.trim(), generationMode,
+    props.direction || summaryType, props.includedMessageIds,
   ]);
   const currentScopeKey = useRef(scopeKey);
   const scopeLocked = busy || (!!job && !TERMINAL.has(job.state));
 
-  useEffect(() => () => { alive.current = false; }, []);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  useEffect(() => { if (job?.state === "complete") props.onComplete?.(job.job_id); }, [job?.job_id, job?.state, props.onComplete]);
   useEffect(() => {
     props.onScopeLockChange?.(scopeLocked);
     return () => { if (scopeLocked) props.onScopeLockChange?.(false); };
@@ -96,18 +136,41 @@ export function GenerationPanel(props: Props) {
   }
 
   async function poll(jobId: string) {
-    for (let attempt = 0; attempt < 10; attempt++) {
+    for (let attempt = 0; alive.current; attempt++) {
       const value = await props.api.generationJob(jobId);
       if (!alive.current) return value;
       setJob(value);
       if (TERMINAL.has(value.state)) return value;
       await new Promise(resolve => setTimeout(resolve, Math.min(4_000, 300 * (2 ** attempt))));
     }
-    throw new Error("generation_polling_paused");
+  }
+
+  async function quickGenerate() {
+    if (!props.prepareSelection || scopeLocked || props.disabled) return;
+    const requestedScope = scopeKey;
+    setBusy(true); setError(""); setPreview(null); setJob(null); setConfirmed(false);
+    try {
+      const selection = await props.prepareSelection();
+      if (!alive.current || currentScopeKey.current !== requestedScope) return;
+      const value = await props.api.previewGeneration(selection);
+      if (Date.parse(value.expires_at) <= Date.now()) throw new Error("preview_expired");
+      if (!alive.current || currentScopeKey.current !== requestedScope) return;
+      const consent = await props.api.authorizeGeneration(value.preview_id);
+      if (Date.parse(consent.expires_at) <= Date.now() || consent.scope_fingerprint !== value.scope_fingerprint ||
+          consent.outbound_authorized !== value.will_send_external) throw new Error("consent_mismatch");
+      if (!alive.current || currentScopeKey.current !== requestedScope) return;
+      const started = await props.api.startGeneration(consent.consent_id, `ui-${crypto.randomUUID()}`);
+      if (!alive.current) return;
+      setJob(started); setBusy(false);
+      if (!TERMINAL.has(started.state)) await poll(started.job_id);
+    } catch {
+      if (alive.current) setError("整理未完成，请检查聊天范围后重试。已有文档仍保留。");
+    } finally { if (alive.current) { setBusy(false); setPreview(null); setConfirmed(false); } }
   }
 
   async function createPreview() {
-    if (!props.snapshotId || !topic.trim() || !props.conversationSelectionIds.length || busy || props.disabled) return;
+    if (!props.snapshotId || !topicValue.trim() || !props.conversationSelectionIds.length || busy || props.disabled ||
+        (hasRetrievedScope && !props.includedMessageIds?.length)) return;
     const requestedScopeKey = scopeKey;
     setBusy(true); setError(""); setPreview(null); setConfirmed(false); setJob(null);
     try {
@@ -115,8 +178,12 @@ export function GenerationPanel(props: Props) {
         source_id: props.sourceId, account_id: props.account,
         conversation_selection_ids: props.conversationSelectionIds,
         snapshot_id: props.snapshotId, start_time: props.rangeStart, end_time: props.rangeEnd,
-        topic: topic.trim(), mode,
+        topic: topicValue.trim(), mode: generationMode,
+        summary_type: summaryType,
         excluded_message_ids: props.excludedMessageIds,
+        ...(hasRetrievedScope ? {
+          included_message_ids: props.includedMessageIds || [],
+        } : {}),
       });
       if (Date.parse(value.expires_at) <= Date.now()) throw new Error("preview_expired");
       if (alive.current && currentScopeKey.current === requestedScopeKey) setPreview(value);
@@ -161,23 +228,44 @@ export function GenerationPanel(props: Props) {
     finally { if (alive.current) setBusy(false); }
   }
 
-  const canPreview = !!props.snapshotId && !!topic.trim() && !!props.conversationSelectionIds.length && !busy && !props.disabled;
+  const canPreview = !!props.snapshotId && !!topicValue.trim() && !!props.conversationSelectionIds.length && !busy && !props.disabled &&
+    (!hasRetrievedScope || !!props.includedMessageIds?.length);
   const failedEvidence = job?.state === "failed" && ["evidence_invalid", "extraction_invalid", "extraction_incomplete", "provider_malformed"].includes(job.error_code || "");
-  return <section className="generation-workspace" aria-label="AI 操作指南生成">
+  if (props.compact) return <>
+    <div className="actions"><button type="button" disabled={props.disabled || scopeLocked || !topicValue.trim()}
+      onClick={() => void quickGenerate()}>{scopeLocked ? "正在整理…" : job?.state === "complete" ? "再次整理" : job?.state === "failed" || error ? "重新整理" : "开始整理"}</button>
+      {job && !TERMINAL.has(job.state) && <button type="button" disabled={busy} onClick={() => void cancel()}>取消整理</button>}
+    </div>
+    <p className="muted">开始整理后，选中的聊天文本将发送给已配置的 AI 服务。</p>
+    {job?.state === "failed" && <p role="alert">生成失败，{failedEvidence ? "返回内容未通过校验" : "AI 服务暂时未完成请求"}。可以重新整理。</p>}
+    {job?.state === "cancelled" && <p role="status">已取消，可以重新整理。</p>}
+    {error && <p role="alert">{error}</p>}
+    {error && job && !TERMINAL.has(job.state) && <button type="button" onClick={() => { setError(""); void poll(job.job_id).catch(() => setError("暂时无法读取结果，请重试查询或取消。")); }}>查询结果</button>}
+    {!props.onComplete && job?.state === "complete" && job.result && <DocumentEditor key={job.job_id} compact api={props.api}
+      generationJobId={job.job_id} outputRootId={props.outputRootId}
+      editRequested={props.editRequested} onEditRequestedChange={props.onEditRequestedChange} />}
+  </>;
+  return <section className="generation-workspace" aria-label="AI 主题整理">
     <div className="search-divider" />
-    <h3>生成操作指南</h3>
+    <h3>生成主题文档</h3>
     <p>先建立本地范围与预算预览；只有确认后，冻结范围内的纯文本才可能发送给所示 AI Provider。</p>
     {!props.snapshotId && <p className="warning">请先完成导出与本地导入，取得可搜索的 immutable snapshot。</p>}
-    <label>操作主题<input type="text" maxLength={512} value={topic} disabled={props.disabled || busy}
+    {!hasRetrievedScope && <><label>操作主题<input type="text" maxLength={512} value={topic} disabled={props.disabled || scopeLocked}
       onChange={event => { setTopic(event.target.value); resetAuthorization(); }} /></label>
     <label>生成模式<select value={mode} disabled={props.disabled || busy} onChange={event => { setMode(event.target.value as "fast" | "complete"); resetAuthorization(); }}>
-      <option value="complete">完整范围</option><option value="fast">主题字面匹配（快速）</option></select></label>
+      <option value="complete">完整范围</option><option value="fast">主题字面匹配（快速）</option></select></label></>}
+    {hasRetrievedScope && <p>主题：{topicValue || "未填写"} · 候选与上下文共 {props.includedMessageIds?.length || 0} 条消息；排除项不会用于生成。</p>}
     <div className="scope-summary"><p>会话：{props.conversationLabels.length ? props.conversationLabels.join("、") : "未选择"}</p>
       <p>时间：{safeDate(props.rangeStart)} 至 {safeDate(props.rangeEnd)}（结束不包含）</p>
       <p>排除：{props.excludedMessageIds.length} 条消息</p></div>
+    <label>你希望从这些聊天中总结什么？<select value={summaryType} disabled={props.disabled || scopeLocked}
+      onChange={event => setSummaryType(event.target.value as SummaryType)}>
+      {(Object.keys(DIRECTION_LABELS) as SummaryType[]).map(type => <option key={type} value={type}>{DIRECTION_LABELS[type]}</option>)}
+    </select></label>
     <div className="actions"><button type="button" disabled={!canPreview} onClick={() => void createPreview()}>{busy && !preview ? "正在建立预览…" : "预览 AI 外发"}</button></div>
     {preview && <section className="outbound-preview" aria-label="AI 外发预览">
       <h4>外发与预算确认</h4>
+      {preview.synthesis_planned && <p>预算包含一次跨段整合：先核对各段引用，再用本次原消息和中间提炼结果组织完整文档。中间结果在生成后产生，发送范围不会增加。</p>}
       {preview.cache_hit ? <p>已命中同一 snapshot 与完整 scope 的本地 verified 缓存，本次预计不会外发。</p> : preview.will_send_external ?
         <p>将向 {preview.provider}（{preview.model}）发送 {preview.message_count} 条纯文本；不发送账号凭据、附件文件或数据库。</p> :
         <p>范围内没有可发送的文本，将在本地返回依据不足。</p>}

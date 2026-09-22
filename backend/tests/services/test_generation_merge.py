@@ -117,3 +117,24 @@ def test_merge_rejects_duplicate_chunk_index_or_extraction_identity() -> None:
         merge_extractions((first, other_same_index))
     with pytest.raises(MergeRejected, match="duplicate extraction"):
         merge_extractions((first, first))
+
+
+def test_summary_chunks_merge_matching_claims_and_keep_citations() -> None:
+    def summary(message_id: str) -> dict[str, object]:
+        return {
+            "status": "complete", "title": "Synthetic summary",
+            "preparations": [], "steps": [], "checks": [],
+            "missing_information": [], "conflicts": [],
+            "summary": {
+                "core_summary": [{"text": "Shared finding", "source_message_ids": [message_id]}],
+                "discussions": [], "decisions": [], "action_items": [], "open_questions": [],
+            },
+        }
+
+    merged = merge_extractions((
+        _extraction(1, "m2", summary("m2")),
+        _extraction(0, "m1", summary("m1")),
+    ))
+
+    assert merged.result.summary.core_summary[0].source_message_ids == ("m1", "m2")
+    assert merged.result.steps == ()
