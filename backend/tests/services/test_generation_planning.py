@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 
 import pytest
 
@@ -361,8 +362,12 @@ def test_undated_messages_require_explicit_internal_opt_in_and_keep_source_order
 
 def test_new_direction_reserves_synthesis_call_and_rejects_budget_overflow():
     messages = tuple(OutboundMessage(message_id=f"m{i}", text="x" * 80) for i in range(2))
-    scope = _scope(messages, summary_type="ideas")
-    limit = estimate_chunk_tokens(scope.topic, messages[:1], summary_type="ideas")
+    scope = _scope(
+        messages, summary_type="ideas",
+        budget=GenerationBudget(max_messages=20, max_input_tokens=100_000,
+                                max_provider_calls=5, max_output_tokens=4_000),
+    )
+    limit = max(estimate_chunk_tokens(scope.topic, (message,), summary_type="ideas") for message in messages)
     plan = build_generation_plan(scope, max_chunk_input_tokens=limit)
     assert plan.provider_calls == 3
     assert plan.synthesis_input_tokens > 0
@@ -377,12 +382,95 @@ def test_synthesis_reserves_room_for_citation_rich_drafts_without_truncating():
     scope = _scope(messages, summary_type="ideas", budget=GenerationBudget(
         max_messages=20, max_input_tokens=100_000, max_provider_calls=5, max_output_tokens=4_000))
     plan = build_generation_plan(scope, max_chunk_input_tokens=estimate_chunk_tokens("target", messages[:1], summary_type="ideas"))
-    draft = GenerationResult(status="complete", title="synthetic", preparations=(), steps=(), checks=(),
+    first_draft = GenerationResult(status="complete", title="synthetic", preparations=(), steps=(), checks=(),
         missing_information=(), conflicts=(), summary=TopicSummary(summary_type="ideas", sections=(
             TopicSection(heading="完整构思", text="x" * 7_000, source_message_ids=("m0",)),)))
-    synthesis = build_synthesis_chunk(scope, plan, (draft, draft))
+    second_draft = first_draft.model_copy(update={"summary": TopicSummary(
+        summary_type="ideas", sections=(
+            TopicSection(heading="补充条件", text="x" * 7_000, source_message_ids=("m1",)),
+        ),
+    )})
+    synthesis = build_synthesis_chunk(scope, plan, (first_draft, second_draft))
     assert synthesis.estimated_input_tokens <= plan.synthesis_input_tokens
-    oversized = draft.model_copy(update={"summary": TopicSummary(summary_type="ideas", sections=(
+    oversized = first_draft.model_copy(update={"summary": TopicSummary(summary_type="ideas", sections=(
         TopicSection(heading="oversized", text="x" * 13_000, source_message_ids=("m0",)),))})
     with pytest.raises(GenerationBudgetExceeded, match="intermediate draft"):
-        build_synthesis_chunk(scope, plan, (oversized, draft))
+        build_synthesis_chunk(scope, plan, (oversized, second_draft))
+
+
+def test_topic_chunks_use_one_task_global_short_reference_map_without_exposing_real_ids():
+    messages = tuple(
+        OutboundMessage(message_id=f"message:v1:{index:064x}", text=f"detail-{index}-" + "x" * 60)
+        for index in range(1, 4)
+    )
+    scope = _scope(
+        messages,
+        summary_type="ideas",
+        budget=GenerationBudget(
+            max_messages=20,
+            max_input_tokens=100_000,
+            max_provider_calls=5,
+            max_output_tokens=4_000,
+        ),
+    )
+    limit = max(estimate_chunk_tokens(scope.topic, (message,), summary_type="ideas") for message in messages)
+
+    plan = build_generation_plan(scope, max_chunk_input_tokens=limit)
+
+    payloads = [json.loads(chunk.payload) for chunk in plan.chunks]
+    assert [item["messages"][0]["message_id"] for item in payloads] == ["E001", "E002", "E003"]
+    assert [chunk.reference_ids for chunk in plan.chunks] == [("E001",), ("E002",), ("E003",)]
+    serialized = "".join(chunk.payload.decode("utf-8") for chunk in plan.chunks)
+    assert all(message.message_id not in serialized for message in messages)
+    assert [[message.message_id for message in chunk.messages] for chunk in plan.chunks] == [
+        [messages[0].message_id], [messages[1].message_id], [messages[2].message_id]
+    ]
+
+
+def test_synthesis_uses_validated_drafts_and_cited_evidence_context_not_full_chronological_messages():
+    messages = tuple(
+        OutboundMessage(message_id=f"message:v1:{index:064x}", text=text, speaker=f"speaker-{index}")
+        for index, text in enumerate(("shared mechanism", "different condition", "uncited noise"), 1)
+    )
+    scope = _scope(
+        messages,
+        summary_type="ideas",
+        budget=GenerationBudget(max_messages=20, max_input_tokens=100_000,
+                                max_provider_calls=5, max_output_tokens=4_000),
+    )
+    limit = max(
+        estimate_chunk_tokens(scope.topic, (message,), summary_type="ideas")
+        for message in messages
+    )
+    plan = build_generation_plan(scope, max_chunk_input_tokens=limit)
+    drafts = (
+        GenerationResult(status="complete", title="draft-a", preparations=(), steps=(), checks=(),
+            missing_information=(), conflicts=(), summary=TopicSummary(summary_type="ideas", sections=(
+                TopicSection(heading="shared", text="same idea with mechanism", source_message_ids=(messages[0].message_id,)),))),
+        GenerationResult(status="complete", title="draft-b", preparations=(), steps=(), checks=(),
+            missing_information=(), conflicts=(), summary=TopicSummary(summary_type="ideas", sections=(
+                TopicSection(heading="conditional", text="independent condition", source_message_ids=(messages[1].message_id,)),))),
+        GenerationResult(status="insufficient_evidence", title="选定范围内未找到足够依据",
+            preparations=(), steps=(), checks=(), missing_information=(), conflicts=()),
+    )
+
+    synthesis = build_synthesis_chunk(scope, plan, drafts)
+
+    payload = json.loads(synthesis.payload)
+    assert "messages" not in payload
+    assert payload["operation"] == "synthesize"
+    assert [item["reference_id"] for item in payload["evidence_context"]] == ["E001", "E002"]
+    assert [item["text"] for item in payload["evidence_context"]] == ["shared mechanism", "different condition"]
+    assert "drafts" not in payload
+    assert [(item["unit_id"], item["source_message_ids"]) for item in payload["idea_units"]] == [
+        ("D001", ["E001"]), ("D002", ["E002"]),
+    ]
+    assert [item["text"] for item in payload["idea_units"]] == [
+        "same idea with mechanism", "independent condition",
+    ]
+    assert "uncited noise" not in synthesis.payload.decode("utf-8")
+    assert all(message.message_id not in synthesis.payload.decode("utf-8") for message in messages)
+    assert tuple(message.message_id for message in synthesis.messages) == (
+        messages[0].message_id, messages[1].message_id
+    )
+    assert synthesis.reference_ids == ("E001", "E002")

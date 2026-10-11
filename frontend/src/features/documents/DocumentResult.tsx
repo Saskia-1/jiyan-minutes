@@ -1,32 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import type { LocalApiClient } from "../../api/client";
-import type { HowToDocument, HowToResult } from "../../types";
+import type { HowToDocument } from "../../types";
 import { ResultView } from "../generation/GenerationPanel";
 import { VersionHistory } from "./VersionHistory";
+import { editableDocumentText, editableTitle, restoreDocumentTitleMarker } from "./documentText";
 
-export function documentText(content: HowToResult): string {
-  if (content.user_text != null) return content.user_text;
-  const lines = [content.title];
-  const add = (heading: string, texts: string[]) => { if (texts.length) lines.push(heading, ...texts); };
-  if (content.summary && "sections" in content.summary) {
-    for (const section of content.summary.sections) add(section.heading, [section.text]);
-  } else if (content.summary) {
-    const names = { core_summary: "核心摘要", discussions: "主要讨论", decisions: "结论", action_items: "待办", open_questions: "待解决问题" };
-    for (const field of Object.keys(names) as (keyof typeof names)[]) add(names[field], content.summary[field].map(item => item.text));
-  } else {
-    add("准备", content.preparations.map(item => item.text));
-    for (const [index, step] of content.steps.entries()) lines.push(`${index + 1}. ${step.instruction}`, ...[
-      step.location && `位置：${step.location}`, step.parameters.length && `参数：${step.parameters.join("、")}`,
-      step.conditions.length && `条件：${step.conditions.join("、")}`, step.warnings.length && `注意：${step.warnings.join("、")}`,
-      step.expected_result && `预期结果：${step.expected_result}`,
-    ].filter(Boolean) as string[]);
-    add("检查", content.checks.map(item => item.text));
-    add("仍缺信息", content.missing_information);
-    add("不同说法", content.conflicts.map(item => [item.description, item.claim_a, item.claim_b, item.resolution || "尚未解决"].join("\n")));
-  }
-  for (const item of content.professional_extensions || []) add(`专业补充 · ${item.heading}（AI 延伸，不代表原聊天）`, [item.text]);
-  return lines.join("\n\n");
-}
+export { editableDocumentText as documentText } from "./documentText";
+
+const TITLE_MARKER_ERROR = "请保留文档标题标记；你的未保存内容仍完整保留。";
 
 export function DocumentResult({ api, generationJobId, initialDocument = null }: {
   api: LocalApiClient; generationJobId?: string; initialDocument?: HowToDocument | null;
@@ -53,13 +34,15 @@ export function DocumentResult({ api, generationJobId, initialDocument = null }:
     }
     return () => { active = false; };
   }, [api, generationJobId, initialDocument]);
-  useEffect(() => { if (doc) setDraft(documentText(doc.current_version.content)); }, [doc?.current_version.version_id]);
+  useEffect(() => { if (doc) setDraft(editableDocumentText(doc.current_version.content)); }, [doc?.current_version.version_id]);
 
   async function save() {
     if (!doc || busy || !draft.trim()) return;
+    const title = editableTitle(draft);
+    if (!title) { setError(TITLE_MARKER_ERROR); return; }
     setBusy(true); setError(""); setNotice("");
     try {
-      const content = { ...doc.current_version.content, user_text: draft, title: draft.trim().split("\n")[0].slice(0, 500) };
+      const content = { ...doc.current_version.content, user_text: draft, title: title.slice(0, 500) };
       setDoc(await api.createDocumentVersion(doc.document_id, doc.current_version.version_id, content, "用户确认完整文本"));
       setEditing(false); setPreviewing(true); setNotice("已确认修改，预览和下载使用新版本。AI 原始版本仍保留。");
     } catch { setError("修改未保存，请保留文本后重试。原版本未被覆盖。"); }
@@ -94,6 +77,9 @@ export function DocumentResult({ api, generationJobId, initialDocument = null }:
       </div>
       {editing && <><label>完整文档<textarea className="full-document" value={draft} maxLength={100000} disabled={busy} onChange={event => setDraft(event.target.value)} /></label>
         <button type="button" disabled={busy || !draft.trim()} onClick={() => void save()}>确认修改</button>
+        {error === TITLE_MARKER_ERROR && doc && <button type="button" disabled={busy} onClick={() => {
+          setDraft(value => restoreDocumentTitleMarker(value, doc.current_version.content.title)); setError("");
+        }}>恢复当前文档标题</button>}
         <p className="muted">可自由删改、补充和重排。确认后保存为用户版本，不覆盖 AI 原文。</p></>}
     </section>
     <section className="panel" aria-label="预览与下载"><h2>4. 预览与下载</h2>

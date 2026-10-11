@@ -121,6 +121,8 @@ class GenerationPreviewView(BaseModel):
     scope_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     provider: str
     model: str
+    thinking: Literal["disabled", "enabled"] = "disabled"
+    reasoning_effort: Literal["low", "high", "max"] | None = None
     mode: Literal["fast", "complete"]
     message_count: int = Field(ge=0)
     character_count: int = Field(ge=0)
@@ -273,6 +275,8 @@ class GenerationJobOrchestrator:
             scope_fingerprint=scope.fingerprint(),
             provider=scope.provider,
             model=scope.model,
+            thinking=scope.thinking,
+            reasoning_effort=scope.reasoning_effort,
             mode=scope.mode,
             message_count=len(scope.messages),
             character_count=character_count,
@@ -447,6 +451,8 @@ class GenerationJobOrchestrator:
             scope = self._scope_from_row(row)
             settings = self._settings_from_row(row)
             identity = self._identity_from_row(row)
+            if settings != self._cache_settings:
+                raise GenerationJobConflict("generation contract changed")
             plan = build_generation_plan(
                 scope, max_chunk_input_tokens=settings.max_chunk_input_tokens
             )
@@ -525,6 +531,8 @@ class GenerationJobOrchestrator:
                                     ),
                                     payload=chunk.payload,
                                     max_output_tokens=scope.budget.max_output_tokens,
+                                    thinking=scope.thinking,
+                                    reasoning_effort=scope.reasoning_effort,
                                 ),
                                 token,
                             )

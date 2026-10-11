@@ -13,7 +13,7 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
 }) {
   const [topic, setTopic] = useState("");
   const [direction, setDirection] = useState<SummaryType>("ideas");
-  const [autoExpand, setAutoExpand] = useState(true);
+  const [autoExpand, setAutoExpand] = useState(false);
   const [terms, setTerms] = useState<string[]>([]);
   const [messages, setMessages] = useState<ChatSearchResult[]>([]);
   const [candidates, setCandidates] = useState<ChatSearchResult[] | null>(null);
@@ -110,7 +110,7 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
     </section>
     <section className="panel" aria-label="关键词与整理方向"><h2>2. 关键词 / 整理方向</h2>
       <label>关键词<input value={topic} maxLength={512} disabled={disabled} placeholder="例如：腾讯音乐黑客松" onChange={event => setTopic(event.target.value)} /></label>
-      <label className="check"><input type="checkbox" checked={autoExpand} disabled={disabled} onChange={event => setAutoExpand(event.target.checked)} />自动扩展相关关键词</label>
+      <label className="check"><input type="checkbox" checked={autoExpand} disabled={disabled} onChange={event => setAutoExpand(event.target.checked)} />自动扩展相关关键词（单独使用非思考请求，只发送主题，可能产生一次额外费用；不发送聊天正文）</label>
       <label>整理方向<select value={direction} disabled={disabled} onChange={event => setDirection(event.target.value as SummaryType)}>
         <option value="viewpoints">观点</option><option value="ideas">Idea / 想法</option><option value="how_to">方法论 / 怎么做</option><option value="mixed">综合整理</option>
       </select></label>

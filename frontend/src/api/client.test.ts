@@ -33,6 +33,27 @@ function json(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
 }
 
+it("文档下载绑定同源 CSRF，401 后仅在下次明确下载时恢复会话", async () => {
+  let sessions = 0, downloads = 0;
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = asRequest(input, init);
+    const path = new URL(request.url).pathname;
+    if (path === "/api/session") return json({ csrf_token: `csrf-${++sessions}`, expires_at: "2099-01-01T00:00:00Z" });
+    expect(path).toBe("/api/documents/document%3Aa/download");
+    expect(request.method).toBe("POST");
+    expect(request.headers.get("X-CSRF-Token")).toBe(`csrf-${sessions}`);
+    expect(init?.credentials).toBe("same-origin");
+    expect(await request.json()).toEqual({ version_id: "version:2", format: "docx", source_mode: "body_only" });
+    return ++downloads === 1 ? new Response(null, { status: 401 }) : new Response("DOCX bytes");
+  }));
+  const api = createClient();
+  await expect(api.downloadDocument("document:a", "version:2", "docx", "body_only")).rejects.toMatchObject({ status: 401 });
+  expect(downloads).toBe(1);
+  const file = await api.downloadDocument("document:a", "version:2", "docx", "body_only");
+  expect(file.size).toBe(10);
+  expect(sessions).toBe(2);
+});
+
 it("所有并发保护 GET 先共享一次 session bootstrap", async () => {
   const paths: string[] = [];
   let bootstrapped = false;
@@ -378,7 +399,7 @@ it("运行时拒绝缺失或串源的 disclosure seal", async () => {
   await expect(client.secretConsent("qq", "account-1")).rejects.toBeInstanceOf(ApiError);
 });
 
-it("生成客户端只发送不透明会话 handle，并严格解析 verified 结果", async () => {
+it.each([null, "viewpoints", "ideas", "how_to", "mixed"] as const)("生成客户端严格解析 %s 结果并保留原证据", async direction => {
   const requests: Request[] = [];
   const complete = {
     job_id: "generation-job:p2", state: "complete", scope_fingerprint: "a".repeat(64), completed_chunks: 1,
@@ -395,12 +416,20 @@ it("生成客户端只发送不透明会话 handle，并严格解析 verified �
       evidence: [{ message_id: `message:v1:${"c".repeat(64)}`, conversation_id: "internal-conversation-a",
         timestamp: "2026-09-01T00:00:01Z", sender_id: null, sender_name: "合成发送者", quote: "合成原文" }] },
   };
+  if (direction && direction !== "how_to") {
+    Object.assign(complete.result, { result: { ...complete.result.result, steps: [], summary: {
+      summary_type: direction, sections: [{ heading: "具体主题", text: "合并后的内容",
+        source_message_ids: [`message:v1:${"c".repeat(64)}`] }],
+    } } });
+    Object.assign(complete.result.evidence[0], { timestamp: null });
+  }
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = asRequest(input, init); requests.push(request.clone());
     const path = new URL(request.url).pathname;
     if (path === "/api/session") return json({ csrf_token: "csrf-1", expires_at: "2099-01-01T00:00:00Z" });
     if (path === "/api/generation/previews/from-selections") return json({
-      preview_id: "preview:p2", scope_fingerprint: "a".repeat(64), provider: "deepseek", model: "deepseek-v4-flash",
+      preview_id: "preview:p2", scope_fingerprint: "a".repeat(64), provider: "deepseek", model: direction === null ? "deepseek-v4-flash" : "deepseek-v4-pro",
+      thinking: direction === null ? "disabled" : "enabled", reasoning_effort: direction === null ? null : "max",
       mode: "complete", message_count: 1, character_count: 4, estimated_input_tokens: 20, max_output_tokens: 2000,
       provider_calls: 1, price_status: "unknown", estimated_cost: null, cache_hit: false, will_send_external: true,
       outbound_payloads: ['{"messages":[{"message_id":"opaque-a","text":"合成"}],"schema_version":1,"topic":"操作主题"}'],
@@ -417,7 +446,9 @@ it("生成客户端只发送不透明会话 handle，并严格解析 verified �
   const previewValue = await client.previewGeneration({ source_id: "qq", account_id: "account-a",
     conversation_selection_ids: ["opaque-a"], snapshot_id: "snapshot:p1", start_time: "2026-09-01T00:00:00Z",
     end_time: "2026-09-02T00:00:00Z", topic: "操作主题", mode: "complete",
-    excluded_message_ids: [excludedMessageId] });
+    excluded_message_ids: [excludedMessageId], ...(direction ? { summary_type: direction } : {}) });
+  expect(previewValue.thinking).toBe(direction === null ? "disabled" : "enabled");
+  expect(previewValue.reasoning_effort).toBe(direction === null ? null : "max");
   await expect(client.previewGeneration({ source_id: "qq", account_id: "account-a",
     conversation_selection_ids: ["opaque-a"], snapshot_id: "snapshot:p1", start_time: "2026-09-01T00:00:00Z",
     end_time: "2026-09-02T00:00:00Z", topic: "操作主题", mode: "complete",
@@ -431,6 +462,10 @@ it("生成客户端只发送不透明会话 handle，并严格解析 verified �
   const result = await client.generationJob("generation-job:p2");
 
   expect(result.result?.evidence[0].quote).toBe("合成原文");
+  if (direction && direction !== "how_to") {
+    expect(result.result?.result.summary).toEqual(expect.objectContaining({ summary_type: direction }));
+    expect(result.result?.evidence[0].timestamp).toBeNull();
+  }
   const bodies = await Promise.all(requests.filter(item => item.method === "POST").map(item => item.json()));
   expect(bodies[0].conversation_selection_ids).toEqual(["opaque-a"]);
   expect(bodies[0].excluded_message_ids).toEqual([excludedMessageId]);
@@ -492,7 +527,7 @@ it("手动导入客户端严格解析预览，只用预览指纹确认提交", a
   expect(requests.filter(item => item.method === "POST").every(item => item.headers.get("X-CSRF-Token") === "csrf-1")).toBe(true);
 });
 
-it("文档恢复客户端列出可重新打开的最新版本", async () => {
+it.each([false, true])("文档恢复客户端列出最新版本，包括证据不足后的自由编辑（%s）", async (freeEdit) => {
   const messageId = `message:v1:${"c".repeat(64)}`;
   const content = { status: "complete", title: "指南 version 2", preparations: [], steps: [{
     instruction: "step", location: null, parameters: [], conditions: [], warnings: [], expected_result: null,
@@ -501,7 +536,8 @@ it("文档恢复客户端列出可重新打开的最新版本", async () => {
   const version = { document_id: "document:p3", version_id: "document-version:2", ordinal: 2,
     origin: "user_edited", evidence_status: "unverified", parent_version_id: "document-version:1",
     restored_from_version_id: null, source_generation_job_id: "generation-job:p2", change_summary: "P0",
-    created_at: "2026-09-05T00:00:01Z", content };
+    created_at: "2026-09-05T00:00:01Z", content: freeEdit ? { ...content, steps: [],
+      status: "insufficient_evidence", user_text: "指南 version 2\n\n用户自己的补充" } : content };
   const document = { document_id: "document:p3", source_generation_job_id: "generation-job:p2",
     source_snapshot_id: "snapshot:p1", created_at: "2026-09-05T00:00:00Z", updated_at: "2026-09-05T00:00:01Z",
     current_version: version, versions: [version], source_evidence: [{ message_id: messageId,
@@ -520,6 +556,7 @@ it("文档恢复客户端列出可重新打开的最新版本", async () => {
 
   expect(recovered.documents[0].current_version.ordinal).toBe(2);
   expect(recovered.documents[0].current_version.content.title).toBe("指南 version 2");
+  if (freeEdit) expect(recovered.documents[0].current_version.content.user_text).toBe("指南 version 2\n\n用户自己的补充");
   expect(await requests[1].json()).toEqual({ cursor: null, limit: 20 });
   expect(requests[1].headers.get("X-CSRF-Token")).toBe("csrf-1");
 });

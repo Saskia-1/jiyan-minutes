@@ -56,8 +56,10 @@ from chat_to_howto.services.generation_jobs import (
 from chat_to_howto.services.generation_planning import (
     GenerationSelection,
 )
+from chat_to_howto.services.generation_prompts import PROMPT_VERSION
 from chat_to_howto.services.p0_verifier import P0Verifier
 from chat_to_howto.services.search import ChatSearchService
+from chat_to_howto.services.topic_expansion import TopicExpansionService
 
 
 _DISCLOSURE_SECTIONS = (
@@ -241,11 +243,15 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
         generation_provider_factory or default_generation_provider
     )
     generation_cache_settings = GenerationCacheSettings(
-        prompt_version="howto-prompt-v1",
-        output_schema_version="generation-envelope-v1",
-        chunk_strategy_version="message-boundary-v1",
-        max_chunk_input_tokens=4_000,
-        provider_behavior_revision=f"{settings.llm_provider}-json-v1",
+        prompt_version=PROMPT_VERSION,
+        output_schema_version="generation-envelope-v4-extensions",
+        chunk_strategy_version="message-boundary-synthesis-v3-short-references",
+        max_chunk_input_tokens=8_000,
+        provider_behavior_revision=(
+            f"{settings.llm_provider}-json-thinking-{settings.llm_reasoning_effort}-v1"
+            if settings.llm_thinking == "enabled" else
+            f"{settings.llm_provider}-json-nonthinking-t0-v3"
+        ),
     )
     generation_orchestrator = GenerationJobOrchestrator(
         repository=chat_repository,
@@ -253,6 +259,11 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
         cache_settings=generation_cache_settings,
         clock=clock,
         max_daily_provider_requests=settings.llm_daily_request_limit,
+    )
+    topic_expansion_service = TopicExpansionService(
+        provider_factory=selected_generation_provider_factory,
+        provider=settings.llm_provider,
+        model=settings.llm_model,
     )
     generation_orchestrator.reconcile_interrupted()
     document_service = DocumentService(repository=chat_repository, clock=clock)
@@ -768,6 +779,7 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
             snapshot_id=snapshot_id,
             start_time=selection.start_time,
             end_time=selection.end_time,
+            include_undated=selection.include_undated,
             limit=selection.limit,
             cursor=selection.cursor,
         )
@@ -812,15 +824,23 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
             end_time=selection.end_time,
             topic=selection.topic,
             mode=selection.mode,
+            generation_kind=selection.generation_kind,
+            summary_type=selection.summary_type,
+            allow_undated=selection.include_undated,
+            included_message_ids=selection.included_message_ids,
             provider=settings.llm_provider,
             model=settings.llm_model,
+            thinking=settings.llm_thinking,
+            reasoning_effort=settings.llm_reasoning_effort,
             redaction_policy_revision="text-only-outbound-v1",
             excluded_message_ids=selection.excluded_message_ids,
             budget=GenerationBudget(
                 max_messages=5_000,
                 max_input_tokens=100_000,
                 max_provider_calls=20,
-                max_output_tokens=4_000,
+                # A full-topic document includes detailed prose and long evidence IDs.
+                # Keep a hard, pre-authorized bound without truncating those references.
+                max_output_tokens=settings.llm_max_output_tokens if selection.summary_type is not None else 4_000,
             ),
         )
 
@@ -856,6 +876,7 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
     app.include_router(
         create_generation_router(
             get_orchestrator=lambda: generation_orchestrator,
+            get_topic_expansion=lambda: topic_expansion_service,
             require_session=require_p1_session,
             require_csrf=require_p1_csrf,
             resolve_selection=resolve_generation_selection,

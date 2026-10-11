@@ -29,6 +29,11 @@ _CONFIG_KEYS = {
     "deepseek_model",
     "llm_daily_request_limit",
 }
+_OPTIONAL_GENERATION_KEYS = {
+    "deepseek_thinking",
+    "deepseek_reasoning_effort",
+    "deepseek_max_output_tokens",
+}
 _MODELS = {"deepseek-v4-flash", "deepseek-v4-pro"}
 _DEFAULT_CONFIG = Path.home() / "Library" / "Application Support" / "Chat to How-To" / "runtime-config.json"
 _GATE1_SOURCE_BLOCKERS = {
@@ -61,12 +66,17 @@ def load_runtime_config(path: Path, *, project_root: Path) -> RuntimeConfig:
         raw = json.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         raise ValueError("runtime configuration is invalid") from None
-    if not isinstance(raw, dict) or set(raw) != _CONFIG_KEYS or raw.get("schema_version") != 1:
+    if (not isinstance(raw, dict) or not _CONFIG_KEYS <= set(raw)
+        or not set(raw) <= _CONFIG_KEYS | _OPTIONAL_GENERATION_KEYS
+        or raw.get("schema_version") != 1):
         raise ValueError("runtime configuration schema is invalid")
     timezone_name = raw.get("app_timezone")
     provider = raw.get("llm_provider")
     model = raw.get("deepseek_model")
     limit = raw.get("llm_daily_request_limit")
+    thinking = raw.get("deepseek_thinking", "disabled")
+    effort = raw.get("deepseek_reasoning_effort")
+    max_output_tokens = raw.get("deepseek_max_output_tokens", 16_000)
     if not isinstance(timezone_name, str) or not timezone_name:
         raise ValueError("application timezone is invalid")
     try:
@@ -79,6 +89,19 @@ def load_runtime_config(path: Path, *, project_root: Path) -> RuntimeConfig:
         raise ValueError("DeepSeek model is invalid")
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10_000:
         raise ValueError("daily request limit is invalid")
+    if (not isinstance(thinking, str) or thinking not in {"disabled", "enabled"}
+        or (thinking == "enabled") != (effort is not None)):
+        raise ValueError("thinking mode and reasoning effort must be explicitly paired")
+    if effort is not None and (not isinstance(effort, str) or effort not in {"low", "high", "max"}):
+        raise ValueError("reasoning effort is invalid")
+    if thinking == "enabled" and (
+        provider != "deepseek" or model != "deepseek-v4-pro" or effort != "max"
+        or "deepseek_max_output_tokens" not in raw
+    ):
+        raise ValueError("acceptance thinking profile requires Pro, max effort, and an explicit output budget")
+    if (isinstance(max_output_tokens, bool) or not isinstance(max_output_tokens, int)
+        or not 1 <= max_output_tokens <= 128_000):
+        raise ValueError("DeepSeek output budget is invalid")
     source_root = Path(project_root).resolve(strict=True)
     data_dir = _private_external_directory(raw.get("app_data_dir"), source_root)
     export_root = _private_external_directory(raw.get("export_root"), source_root)
@@ -94,6 +117,9 @@ def load_runtime_config(path: Path, *, project_root: Path) -> RuntimeConfig:
         llm_provider=provider,
         llm_model=model,
         llm_daily_request_limit=limit,
+        llm_thinking=thinking,
+        llm_reasoning_effort=effort,
+        llm_max_output_tokens=max_output_tokens,
     )
     return RuntimeConfig(settings=settings, origin="http://127.0.0.1:8765")
 
@@ -148,7 +174,10 @@ def create_runtime_app():
     def generation_provider_factory(provider_name: str):
         if provider_name != "deepseek" or provider_name != settings.llm_provider:
             raise ValueError("generation provider is not configured")
-        return DeepSeekProvider.from_environment(timeout_seconds=180)
+        return DeepSeekProvider.from_environment(
+            timeout_seconds=600 if settings.llm_thinking == "enabled" else 180,
+            max_response_bytes=4_194_304 if settings.llm_thinking == "enabled" else 1_048_576,
+        )
 
     return create_app(
         settings=settings,

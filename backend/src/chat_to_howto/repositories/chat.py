@@ -2482,8 +2482,9 @@ class ChatRepository:
         snapshot_id: str | None,
         start_time_utc: str,
         end_time_utc: str,
-        cursor: tuple[str, str] | None,
+        cursor: tuple[str, str] | tuple[int, str] | None,
         limit: int,
+        include_undated: bool = False,
     ) -> tuple[dict[str, object], ...]:
         """Return one row per stable identity from session-owned sealed snapshots.
 

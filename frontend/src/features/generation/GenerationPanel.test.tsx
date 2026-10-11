@@ -5,6 +5,7 @@ import type { LocalApiClient } from "../../api/client";
 
 const preview = {
   preview_id: "preview:p2", scope_fingerprint: "a".repeat(64), provider: "fake", model: "deterministic",
+  thinking: "disabled" as const, reasoning_effort: null,
   mode: "complete" as const, message_count: 1, character_count: 22, estimated_input_tokens: 40,
   max_output_tokens: 2000, provider_calls: 1, price_status: "unknown" as const, estimated_cost: null,
   cache_hit: false, will_send_external: true,
@@ -53,7 +54,7 @@ const props = {
   disabled: false,
 };
 
-it("简洁流程连续生成、切换方向和失败重试都会重新建立单次授权", async () => {
+it("简洁流程先展示外发预览并逐次确认，切换方向和失败重试不复用授权", async () => {
   const { GenerationPanel } = await import("./GenerationPanel");
   const client = api({
     startGeneration: vi.fn()
@@ -71,16 +72,29 @@ it("简洁流程连续生成、切换方向和失败重试都会重新建立单�
   const user = userEvent.setup();
   const view = render(<GenerationPanel {...props} api={client} compact prepareSelection={prepare} retrievalTopic="音乐" />);
   await user.click(screen.getByRole("button", { name: "开始整理" }));
+  expect(await screen.findByRole("region", { name: "AI 外发预览" })).toBeVisible();
+  expect(client.authorizeGeneration).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("checkbox", { name: /授权本次向外部 AI/ }));
+  await user.click(screen.getByRole("button", { name: "确认并生成" }));
   await waitFor(() => expect(screen.getByRole("button", { name: "再次整理" })).toBeEnabled());
   prepare.mockResolvedValue({ ...selection, summary_type: "viewpoints" });
   view.rerender(<GenerationPanel {...props} api={client} compact prepareSelection={prepare} retrievalTopic="音乐" direction="viewpoints" />);
   await user.click(screen.getByRole("button", { name: /开始整理|再次整理/ }));
+  expect(client.authorizeGeneration).toHaveBeenCalledTimes(1);
+  await user.click(await screen.findByRole("checkbox", { name: /授权本次向外部 AI/ }));
+  await user.click(screen.getByRole("button", { name: "确认并生成" }));
   await screen.findByText(/生成失败/);
   await user.click(screen.getByRole("button", { name: "重新整理" }));
+  expect(client.authorizeGeneration).toHaveBeenCalledTimes(2);
+  await user.click(await screen.findByRole("checkbox", { name: /授权本次向外部 AI/ }));
+  await user.click(screen.getByRole("button", { name: "确认并生成" }));
   await waitFor(() => expect(screen.getByRole("button", { name: "再次整理" })).toBeEnabled());
   prepare.mockResolvedValue({ ...selection, summary_type: "how_to" });
   view.rerender(<GenerationPanel {...props} api={client} compact prepareSelection={prepare} retrievalTopic="音乐" direction="how_to" />);
   await user.click(screen.getByRole("button", { name: /开始整理|再次整理/ }));
+  expect(client.authorizeGeneration).toHaveBeenCalledTimes(3);
+  await user.click(await screen.findByRole("checkbox", { name: /授权本次向外部 AI/ }));
+  await user.click(screen.getByRole("button", { name: "确认并生成" }));
   await waitFor(() => expect(screen.getByRole("button", { name: "再次整理" })).toBeEnabled());
   expect(client.previewGeneration).toHaveBeenLastCalledWith(expect.objectContaining({ summary_type: "how_to", included_message_ids: ["message-a"] }));
   expect(client.previewGeneration).toHaveBeenCalledTimes(4);
@@ -115,7 +129,7 @@ it("先展示外发范围和预算，再授权生成并检查已验证证据", a
   expect((client.previewGeneration as any).mock.calls[0][0].excluded_message_ids).toEqual([]);
 });
 
-it("聊天总结只发送召回消息，并可从单条结论查看原始证据", async () => {
+it("Ideas 只发送召回消息，正文不附逐条依据但保留统一证据入口", async () => {
   const { GenerationPanel } = await import("./GenerationPanel");
   const messageId = `message:v1:${"c".repeat(64)}`;
   const summaryJob = { ...completeJob, result: { ...completeJob.result,
@@ -134,9 +148,10 @@ it("聊天总结只发送召回消息，并可从单条结论查看原始证据"
   await user.click(screen.getByRole("button", { name: "确认并生成" }));
 
   const item = (await screen.findByText("合成核心结论")).closest("section")!;
-  await user.click(within(item).getByText(/查看原始依据/));
-  expect(within(item).getByText("合成发送者")).toBeVisible();
-  expect(within(item).getByText("合成证据原文")).toBeVisible();
+  expect(within(item).queryByText(/查看原始依据|证据 1|依据：/)).not.toBeInTheDocument();
+  await user.click(screen.getByText(/查看原始依据/));
+  expect(screen.getByText("合成发送者")).toBeVisible();
+  expect(screen.getByText("合成证据原文")).toBeVisible();
   expect((client.previewGeneration as any).mock.calls[0][0]).toMatchObject({
     summary_type: "ideas", topic: "就业", mode: "complete", included_message_ids: [messageId],
   });

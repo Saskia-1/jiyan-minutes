@@ -6,6 +6,7 @@ import os
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 
 def load_deepseek_environment(project_root: Path) -> bool:
@@ -50,6 +51,9 @@ class Settings:
     llm_provider: str
     llm_model: str = "deepseek-v4-flash"
     llm_daily_request_limit: int = 100
+    llm_thinking: Literal["disabled", "enabled"] = "disabled"
+    llm_reasoning_effort: Literal["low", "high", "max"] | None = None
+    llm_max_output_tokens: int = 16_000
 
     @classmethod
     def load(cls) -> "Settings":

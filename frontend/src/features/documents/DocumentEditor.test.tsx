@@ -44,7 +44,7 @@ it("无文件选择 API 时发起真实浏览器下载，不声称能控制本�
 });
 
 it("简洁编辑默认关闭，完整文本确认后追加版本并下载最新正文", async () => {
-  const text = "用户确认标题\n\n自由补充的完整内容";
+  const text = "# 用户确认标题\n\n## 用户章节\n\n自由补充的完整内容";
   const saved: HowToDocument = { ...initial, current_version: { ...initial.current_version,
     version_id: "document-version:2", ordinal: 2, origin: "user_edited", evidence_status: "unverified",
     content: { ...content, title: "用户确认标题", user_text: text } }, versions: initial.versions };
@@ -64,11 +64,15 @@ it("简洁编辑默认关闭，完整文本确认后追加版本并下载最新�
   expect(screen.getByText("AI 原始步骤")).toBeVisible();
   await user.click(screen.getByRole("radio", { name: "是" }));
   expect(screen.getAllByRole("textbox")).toHaveLength(1);
-  expect(screen.getByRole("textbox", { name: "完整文档" })).toHaveValue("AI 原始标题\n\n1. AI 原始步骤");
+  expect(screen.getByRole("textbox", { name: "完整文档" })).toHaveValue("# AI 原始标题\n\n## 步骤\n\n1. AI 原始步骤");
   fireEvent.change(screen.getByRole("textbox", { name: "完整文档" }), { target: { value: text } });
   expect(screen.getByText("AI 原始步骤")).toBeVisible();
   await user.click(screen.getByRole("button", { name: "确认修改" }));
   expect(await screen.findByText(/自由补充的完整内容/)).toBeVisible();
+  expect(screen.getByRole("heading", { name: "用户确认标题" })).toBeVisible();
+  expect(screen.getByRole("heading", { name: "用户章节" })).toBeVisible();
+  expect(screen.queryByText("# 用户确认标题")).not.toBeInTheDocument();
+  expect(screen.queryByText("## 用户章节")).not.toBeInTheDocument();
   expect(screen.queryByText(/AI 生成 · 本地证据已验证/)).not.toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "下载文档" }));
   await waitFor(() => expect(write).toHaveBeenCalledOnce());
@@ -79,7 +83,40 @@ it("简洁编辑默认关闭，完整文本确认后追加版本并下载最新�
   vi.unstubAllGlobals();
 });
 
-it("自然章节可编辑且保留原消息引用，证据默认折叠并保留未知时间", async () => {
+it("误删一级标题标记时保留草稿并可恢复已保存标题", async () => {
+  const draftWithoutMarker = "AI 原始标题\n\n用户已经修改的正文";
+  const restoredDraft = "# AI 原始标题\n\n用户已经修改的正文";
+  const saved: HowToDocument = { ...initial, current_version: { ...initial.current_version,
+    version_id: "document-version:2", ordinal: 2, origin: "user_edited", evidence_status: "unverified",
+    content: { ...content, user_text: restoredDraft } }, versions: initial.versions };
+  const api = { createDocumentVersion: vi.fn().mockResolvedValue(saved) } as unknown as LocalApiClient;
+  const { DocumentEditor } = await import("./DocumentEditor");
+  const user = userEvent.setup();
+  render(<DocumentEditor compact api={api} initialDocument={initial} />);
+
+  await user.click(screen.getByRole("radio", { name: "是" }));
+  const editor = screen.getByRole("textbox", { name: "完整文档" });
+  fireEvent.change(editor, { target: { value: draftWithoutMarker } });
+  await user.click(screen.getByRole("button", { name: "确认修改" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("请保留文档标题标记");
+  expect(editor).toHaveValue(draftWithoutMarker);
+  expect(api.createDocumentVersion).not.toHaveBeenCalled();
+
+  await user.click(screen.getByRole("button", { name: "恢复当前文档标题" }));
+  expect(editor).toHaveValue(restoredDraft);
+  await user.click(screen.getByRole("button", { name: "确认修改" }));
+  await waitFor(() => expect(api.createDocumentVersion).toHaveBeenCalledWith(
+    initial.document_id,
+    initial.current_version.version_id,
+    expect.objectContaining({ title: "AI 原始标题", user_text: restoredDraft }),
+    "用户确认完整文本",
+  ));
+  expect(await screen.findByText("用户已经修改的正文")).toBeVisible();
+  expect(screen.queryByRole("heading", { name: "用户已经修改的正文" })).not.toBeInTheDocument();
+});
+
+it("Ideas 章节可编辑且保留内部引用，统一证据入口默认折叠并保留未知时间", async () => {
   const topicContent = { ...content, steps: [], summary: { summary_type: "ideas" as const,
     sections: [{ heading: "音乐身份", text: "将音乐标签与分享整合为个人音乐画像。",
       source_message_ids: [initial.source_evidence[0].message_id] }] } };
@@ -90,7 +127,8 @@ it("自然章节可编辑且保留原消息引用，证据默认折叠并保留�
   const { DocumentEditor } = await import("./DocumentEditor");
   const user = userEvent.setup();
   render(<DocumentEditor api={api} initialDocument={doc} />);
-  const evidenceToggle = screen.getAllByText(/查看原始依据/)[0];
+  expect(screen.getByRole("textbox", { name: "章节正文 1" }).closest("section")?.querySelector(".document-evidence")).toBeNull();
+  const evidenceToggle = screen.getByText(/查看来源证据/);
   expect(evidenceToggle.closest("details")).not.toHaveAttribute("open");
   await user.click(evidenceToggle);
   expect(screen.getAllByText("时间未知")[0]).toBeVisible();

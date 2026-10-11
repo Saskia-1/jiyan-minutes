@@ -2,7 +2,7 @@ import {
   completenessStates, conversationTypes, evidenceClasses, secretOperations, secretSectionLabels, sourceBaseUrls, sourceIds, sourceTools, statusLabels, validTimezone, verificationStates,
   type Conversation, type Disclosure, type EnvironmentReport, type Report, type SecretDisclosure, type Selection, type SetupOptions,
   type SecretOperation, type Source, type SourceConfiguration, type SourceId,
-  type ChatSearchPage, type ChatSearchRequest, type ExportConsent, type ExportJob, type ExportSelection,
+  type ChatSearchPage, type ChatSearchRequest, type TopicExpansion, type GenerationContext, type LegacyChatSummary, type ExportConsent, type ExportJob, type ExportSelection,
   generationStates, type GenerationConsent, type GenerationJob, type GenerationPreview, type GenerationSelectionRequest,
   deletionCountKeys, type DeletionCountKey, type DeletionPlan, type DeletionResult,
   type DocumentArtifact, type DocumentRecoveryPage, type DocumentVersion, type HowToDocument, type HowToResult, type ValidatedEvidence, type ValidatedGeneration,
@@ -255,10 +255,11 @@ function parseSearchPage(value: unknown): ChatSearchPage {
   exactPublicFields(value, ["results", "next_cursor"]);
   const results = value.results.map(item => {
     if (!isObject(item)) return invalid();
-    exactPublicFields(item, ["message_id", "conversation_id", "timestamp", "sender_id", "sender_name", "text", "batch_id", "snapshot_id"]);
+    exactPublicFields(item, ["message_id", "conversation_id", "timestamp", "sender_id", "sender_name", "text", "batch_id", "snapshot_id", ...(Object.hasOwn(item, "source_order") ? ["source_order"] : [])]);
     const nullableText = (input: unknown) => input === null ? null : typeof input === "string" ? input : invalid();
     return {
-      message_id: requiredString(item.message_id), conversation_id: requiredString(item.conversation_id), timestamp: expiresAt(item.timestamp),
+      message_id: requiredString(item.message_id), conversation_id: requiredString(item.conversation_id), timestamp: item.timestamp === null ? null : expiresAt(item.timestamp),
+      ...(Object.hasOwn(item, "source_order") ? { source_order: nullableInteger(item.source_order) ?? invalid() } : {}),
       sender_id: nullableText(item.sender_id), sender_name: nullableText(item.sender_name), text: nullableText(item.text),
       batch_id: requiredString(item.batch_id), snapshot_id: requiredString(item.snapshot_id),
     };
@@ -266,20 +267,35 @@ function parseSearchPage(value: unknown): ChatSearchPage {
   if (new Set(results.map(item => item.message_id)).size !== results.length) return invalid();
   return { results, next_cursor: value.next_cursor === null ? null : requiredString(value.next_cursor) };
 }
+function parseTopicExpansion(value: unknown): TopicExpansion {
+  if (!isObject(value) || !Array.isArray(value.terms) || typeof value.degraded !== "boolean") return invalid();
+  exactPublicFields(value, ["topic", "terms", "degraded"]);
+  const topic = requiredString(value.topic);
+  const terms = value.terms.map(requiredString);
+  if (!terms.length || terms.length > 10 || terms[0] !== topic ||
+      terms.some(term => term.length > 512) || new Set(terms.map(term => term.toLowerCase())).size !== terms.length) return invalid();
+  return { topic, terms, degraded: value.degraded };
+}
 function parseGenerationPreview(value: unknown): GenerationPreview {
   if (!isObject(value) || !Array.isArray(value.outbound_payloads)) return invalid();
-  exactPublicFields(value, ["preview_id", "scope_fingerprint", "provider", "model", "mode", "message_count", "character_count",
+  exactPublicFields(value, ["preview_id", "scope_fingerprint", "provider", "model", "thinking", "reasoning_effort", "mode", "message_count", "character_count",
     "estimated_input_tokens", "max_output_tokens", "provider_calls", "price_status", "estimated_cost", "cache_hit",
-    "will_send_external", "outbound_payloads", "expires_at"]);
+    "will_send_external", "outbound_payloads", "expires_at", ...(Object.hasOwn(value, "synthesis_planned") ? ["synthesis_planned"] : [])]);
+  if (Object.hasOwn(value, "synthesis_planned") && typeof value.synthesis_planned !== "boolean") return invalid();
   if (value.price_status !== "unknown" || value.estimated_cost !== null || typeof value.cache_hit !== "boolean" ||
       typeof value.will_send_external !== "boolean") return invalid();
+  const thinking = member(["disabled", "enabled"] as const, value.thinking);
+  const reasoningEffort = value.reasoning_effort === null ? null : member(["low", "high", "max"] as const, value.reasoning_effort);
+  if ((thinking === "enabled") !== (reasoningEffort !== null)) return invalid();
   const integer = (item: unknown) => Number.isInteger(item) && Number(item) >= 0 ? Number(item) : invalid();
   return { preview_id: requiredString(value.preview_id), scope_fingerprint: disclosureHash(value.scope_fingerprint),
     provider: requiredString(value.provider), model: requiredString(value.model), mode: member(["fast", "complete"] as const, value.mode),
+    thinking, reasoning_effort: reasoningEffort,
     message_count: integer(value.message_count), character_count: integer(value.character_count),
     estimated_input_tokens: integer(value.estimated_input_tokens), max_output_tokens: integer(value.max_output_tokens),
     provider_calls: integer(value.provider_calls), price_status: "unknown", estimated_cost: null,
     cache_hit: value.cache_hit, will_send_external: value.will_send_external,
+    ...(value.synthesis_planned === true ? { synthesis_planned: true } : {}),
     outbound_payloads: value.outbound_payloads.map(item => typeof item === "string" && item.trim() ? item : invalid()),
     expires_at: expiresAt(value.expires_at) };
 }
@@ -294,7 +310,11 @@ const plainStrings = (value: unknown): string[] => Array.isArray(value) && value
 function parseHowTo(value: unknown): HowToResult {
   if (!isObject(value) || !Array.isArray(value.preparations) || !Array.isArray(value.steps) || !Array.isArray(value.checks) ||
       !Array.isArray(value.missing_information) || !Array.isArray(value.conflicts)) return invalid();
-  exactPublicFields(value, ["status", "title", "preparations", "steps", "checks", "missing_information", "conflicts"]);
+  const hasSummary = Object.hasOwn(value, "summary");
+  const optionalFields = ["professional_extensions", "user_text"].filter(field => Object.hasOwn(value, field));
+  exactPublicFields(value, [...(hasSummary
+    ? ["status", "title", "preparations", "steps", "checks", "missing_information", "conflicts", "summary"]
+    : ["status", "title", "preparations", "steps", "checks", "missing_information", "conflicts"]), ...optionalFields]);
   const preparations = value.preparations.map(item => {
     if (!isObject(item)) return invalid(); exactPublicFields(item, ["source_message_ids", "text"]);
     return { text: requiredString(item.text), source_message_ids: parseStringList(item.source_message_ids) };
@@ -320,9 +340,48 @@ function parseHowTo(value: unknown): HowToResult {
   });
   const status = member(["complete", "insufficient_evidence"] as const, value.status);
   const title = requiredString(value.title);
-  if ((status === "complete" && !steps.length) || (status === "insufficient_evidence" &&
-      (title !== "选定范围内未找到足够依据" || preparations.length || steps.length || checks.length || conflicts.length))) return invalid();
-  return { status, title, preparations, steps, checks, missing_information: plainStrings(value.missing_information), conflicts };
+  const summary = hasSummary ? parseChatSummary(value.summary) : undefined;
+  if ((status === "complete" && !steps.length && !summary) ||
+      (summary && (steps.length || preparations.length || checks.length || conflicts.length || plainStrings(value.missing_information).length)) ||
+      (status === "insufficient_evidence" &&
+      ((!Object.hasOwn(value, "user_text") && title !== "选定范围内未找到足够依据") || preparations.length || steps.length || checks.length || conflicts.length || summary))) return invalid();
+  return { status, title, preparations, steps, checks, missing_information: plainStrings(value.missing_information), conflicts,
+    ...(Object.hasOwn(value, "professional_extensions") ? { professional_extensions: (() => {
+      if (!Array.isArray(value.professional_extensions) || value.professional_extensions.length > 12) return invalid();
+      return value.professional_extensions.map(item => {
+        if (!isObject(item)) return invalid(); exactPublicFields(item, ["heading", "text"]);
+        return { heading: requiredString(item.heading), text: requiredString(item.text) };
+      });
+    })() } : {}),
+    ...(Object.hasOwn(value, "user_text") ? { user_text: requiredString(value.user_text) } : {}),
+    ...(summary ? { summary } : {}) };
+}
+function parseChatSummary(value: unknown): NonNullable<HowToResult["summary"]> {
+  if (!isObject(value)) return invalid();
+  if (Object.hasOwn(value, "sections")) {
+    exactPublicFields(value, ["summary_type", "sections"]);
+    if (!Array.isArray(value.sections) || !value.sections.length || value.sections.length > 40) return invalid();
+    return { summary_type: member(["viewpoints", "ideas", "mixed"] as const, value.summary_type),
+      sections: value.sections.map(section => {
+        if (!isObject(section)) return invalid();
+        exactPublicFields(section, ["heading", "text", "source_message_ids"]);
+        return { heading: requiredString(section.heading), text: requiredString(section.text),
+          source_message_ids: parseStringList(section.source_message_ids) };
+      }) };
+  }
+  const sections = ["core_summary", "discussions", "decisions", "action_items", "open_questions"] as const;
+  exactPublicFields(value, sections);
+  const parsed = Object.fromEntries(sections.map(section => [section, (() => {
+    const items = value[section];
+    if (!Array.isArray(items)) return invalid();
+    return items.map(item => {
+      if (!isObject(item)) return invalid();
+      exactPublicFields(item, ["text", "source_message_ids"]);
+      return { text: requiredString(item.text), source_message_ids: parseStringList(item.source_message_ids) };
+    });
+  })()])) as unknown as LegacyChatSummary;
+  if (!parsed.core_summary.length) return invalid();
+  return parsed;
 }
 function parseValidatedGeneration(value: unknown): ValidatedGeneration {
   if (!isObject(value) || !Array.isArray(value.source_extraction_ids) || !Array.isArray(value.evidence)) return invalid();
@@ -332,9 +391,10 @@ function parseValidatedGeneration(value: unknown): ValidatedGeneration {
     if (!isObject(item)) return invalid();
     exactPublicFields(item, ["message_id", "conversation_id", "timestamp", "sender_id", "sender_name", "quote"]);
     return { message_id: requiredString(item.message_id), conversation_id: requiredString(item.conversation_id),
-      timestamp: expiresAt(item.timestamp), sender_id: nullableString(item.sender_id), sender_name: nullableString(item.sender_name),
+      timestamp: item.timestamp === null ? null : expiresAt(item.timestamp), sender_id: nullableString(item.sender_id), sender_name: nullableString(item.sender_name),
       quote: requiredString(item.quote) };
   });
+  if (isObject(value.result) && Object.hasOwn(value.result, "user_text")) return invalid();
   return { evidence_status: "verified", batch_id: requiredString(value.batch_id), snapshot_id: requiredString(value.snapshot_id),
     scope_fingerprint: disclosureHash(value.scope_fingerprint), source_extraction_ids: parseStringList(value.source_extraction_ids, true),
     result: parseHowTo(value.result), evidence };
@@ -374,7 +434,7 @@ function parseEvidence(value: unknown): ValidatedEvidence {
   if (!isObject(value)) return invalid();
   exactPublicFields(value, ["message_id", "conversation_id", "timestamp", "sender_id", "sender_name", "quote"]);
   return { message_id: requiredString(value.message_id), conversation_id: requiredString(value.conversation_id),
-    timestamp: expiresAt(value.timestamp), sender_id: nullableString(value.sender_id), sender_name: nullableString(value.sender_name),
+    timestamp: value.timestamp === null ? null : expiresAt(value.timestamp), sender_id: nullableString(value.sender_id), sender_name: nullableString(value.sender_name),
     quote: requiredString(value.quote) };
 }
 function parseDocumentVersion(value: unknown): DocumentVersion {
@@ -384,6 +444,7 @@ function parseDocumentVersion(value: unknown): DocumentVersion {
   const origin = member(["ai_generated", "user_edited", "restored"] as const, value.origin);
   const evidence_status = member(["verified", "unverified"] as const, value.evidence_status);
   if ((origin === "ai_generated") !== (evidence_status === "verified") || typeof value.change_summary !== "string") return invalid();
+  if (origin === "ai_generated" && isObject(value.content) && Object.hasOwn(value.content, "user_text")) return invalid();
   return { document_id: requiredString(value.document_id), version_id: requiredString(value.version_id),
     ordinal: nullableInteger(value.ordinal) || invalid(), origin, evidence_status,
     parent_version_id: nullableString(value.parent_version_id), restored_from_version_id: nullableString(value.restored_from_version_id),
@@ -448,7 +509,19 @@ function parseImportPreview(value: unknown): ImportPreview {
   const integer = (item: unknown) => Number.isInteger(item) && Number(item) >= 0 ? Number(item) : invalid();
   const columns = plainStrings(value.source.columns); const warnings = plainStrings(value.source.warnings);
   const mapping = Object.fromEntries(Object.entries(value.applied_mapping).map(([key, item]) => [requiredString(key), requiredString(item)]));
-  const analysis = value.analysis;
+  return {
+    preview_id: requiredString(value.preview_id), preview_fingerprint: disclosureHash(value.preview_fingerprint),
+    expires_at_utc: expiresAt(value.expires_at_utc), ready_to_commit: value.ready_to_commit,
+    source: { format: member(["txt", "csv", "json", "jsonl", "xlsx"] as const, value.source.format),
+      encoding: requiredString(value.source.encoding), container: member(["plain", "zip", "xlsx"] as const, value.source.container),
+      member_name: nullableString(value.source.member_name), row_count: integer(value.source.row_count), columns,
+      sha256: disclosureHash(value.source.sha256), byte_size: integer(value.source.byte_size), warnings },
+    applied_mapping: mapping, analysis: parseImportAnalysis(value.analysis),
+  };
+}
+function parseImportAnalysis(analysis: unknown): ImportPreview["analysis"] {
+  if (!isObject(analysis)) return invalid();
+  const integer = (item: unknown) => Number.isInteger(item) && Number(item) >= 0 ? Number(item) : invalid();
   if (!isObject(analysis.message_types) || !Array.isArray(analysis.conversations) || !Array.isArray(analysis.warnings) ||
       !Array.isArray(analysis.issues) || !Array.isArray(analysis.samples)) return invalid();
   exactPublicFields(analysis, ["total_count", "parsed_count", "unresolved_count", "duplicate_count", "sender_count", "time_start", "time_end",
@@ -465,27 +538,19 @@ function parseImportPreview(value: unknown): ImportPreview {
   const samples = analysis.samples.map(item => {
     if (!isObject(item)) return invalid(); exactPublicFields(item, ["row_number", "conversation_name", "sender_name", "timestamp", "message_type", "text"]);
     return { row_number: integer(item.row_number), conversation_name: nullableString(item.conversation_name), sender_name: nullableString(item.sender_name),
-      timestamp: expiresAt(item.timestamp), message_type: requiredString(item.message_type), text: item.text === null ? null : typeof item.text === "string" ? item.text : invalid() };
+      timestamp: item.timestamp === null ? null : expiresAt(item.timestamp), message_type: requiredString(item.message_type), text: item.text === null ? null : typeof item.text === "string" ? item.text : invalid() };
   });
-  return {
-    preview_id: requiredString(value.preview_id), preview_fingerprint: disclosureHash(value.preview_fingerprint),
-    expires_at_utc: expiresAt(value.expires_at_utc), ready_to_commit: value.ready_to_commit,
-    source: { format: member(["txt", "csv", "json", "jsonl", "xlsx"] as const, value.source.format),
-      encoding: requiredString(value.source.encoding), container: member(["plain", "zip", "xlsx"] as const, value.source.container),
-      member_name: nullableString(value.source.member_name), row_count: integer(value.source.row_count), columns,
-      sha256: disclosureHash(value.source.sha256), byte_size: integer(value.source.byte_size), warnings },
-    applied_mapping: mapping,
-    analysis: { total_count: integer(analysis.total_count), parsed_count: integer(analysis.parsed_count),
+  return { total_count: integer(analysis.total_count), parsed_count: integer(analysis.parsed_count),
       unresolved_count: integer(analysis.unresolved_count), duplicate_count: integer(analysis.duplicate_count), sender_count: integer(analysis.sender_count),
       time_start: analysis.time_start === null ? null : expiresAt(analysis.time_start), time_end: analysis.time_end === null ? null : expiresAt(analysis.time_end),
       message_types: { text: integer(analysis.message_types.text), image: integer(analysis.message_types.image),
         file: integer(analysis.message_types.file), other: integer(analysis.message_types.other), unknown: integer(analysis.message_types.unknown) },
-      conversations, warnings: plainStrings(analysis.warnings), issues, samples },
+      conversations, warnings: plainStrings(analysis.warnings), issues, samples,
   };
 }
 function parseImportCommit(value: unknown): ImportCommit {
   if (!isObject(value) || !Array.isArray(value.conversations) || !Array.isArray(value.warnings) || value.source_id !== "manual") return invalid();
-  exactPublicFields(value, ["import_id", "batch_id", "snapshot_id", "source_id", "account_id", "range_start", "range_end", "display_timezone", "conversations", "warnings"]);
+  exactPublicFields(value, ["import_id", "batch_id", "snapshot_id", "source_id", "account_id", "range_start", "range_end", "display_timezone", "conversations", "warnings", ...(Object.hasOwn(value, "analysis") ? ["analysis"] : [])]);
   const range_start = expiresAt(value.range_start); const range_end = expiresAt(value.range_end);
   const display_timezone = requiredString(value.display_timezone);
   if (Date.parse(range_end) <= Date.parse(range_start)) return invalid();
@@ -499,7 +564,8 @@ function parseImportCommit(value: unknown): ImportCommit {
   return { import_id: requiredString(value.import_id), batch_id: requiredString(value.batch_id), snapshot_id: requiredString(value.snapshot_id),
     source_id: "manual", account_id: requiredString(value.account_id), range_start, range_end,
     display_timezone,
-    conversations, warnings: plainStrings(value.warnings) };
+    conversations, warnings: plainStrings(value.warnings),
+    ...(Object.hasOwn(value, "analysis") ? { analysis: parseImportAnalysis(value.analysis) } : {}) };
 }
 function parseImportRecoveryPage(value: unknown): ImportRecoveryPage {
   if (!isObject(value) || !Array.isArray(value.imports)) return invalid();
@@ -693,6 +759,19 @@ export function createClient() {
           (search.cursor !== null && (!search.cursor || search.cursor.length > 2048))) return Promise.reject(new ApiError(0));
       return request("/api/search/from-selections", parseSearchPage, search);
     },
+    expandTopic: (topic: string) => {
+      if (!topic.trim() || topic.length > 512) return Promise.reject(new ApiError(0));
+      return request("/api/generation/topic-expansion", parseTopicExpansion, { topic: topic.trim() });
+    },
+    previewGenerationContext: (selection: GenerationSelectionRequest) => request(
+      "/api/generation/contexts/from-selections", (value: unknown): GenerationContext => {
+        if (!isObject(value)) return invalid();
+        exactPublicFields(value, ["messages", "added_count"]);
+        const messages = parseSearchPage({ results: value.messages, next_cursor: null }).results;
+        const count = nullableInteger(value.added_count);
+        if (count === null || count > messages.length || messages.length > 2_000) return invalid();
+        return { messages, added_count: count };
+      }, selection),
     previewGeneration: (selection: GenerationSelectionRequest) => {
       const valid = (sourceIds.includes(selection.source_id as SourceId) || selection.source_id === "manual") && !!selection.account_id.trim() &&
         selection.conversation_selection_ids.length > 0 && selection.conversation_selection_ids.length <= 50 &&
@@ -703,7 +782,13 @@ export function createClient() {
         selection.excluded_message_ids.every(item => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(item)) &&
         /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(selection.snapshot_id) &&
         Number.isFinite(Date.parse(selection.start_time)) && Date.parse(selection.end_time) > Date.parse(selection.start_time) &&
-        !!selection.topic.trim() && selection.topic.length <= 512 && ["fast", "complete"].includes(selection.mode);
+        !!selection.topic.trim() && selection.topic.length <= 512 && ["fast", "complete"].includes(selection.mode) &&
+        (selection.generation_kind === undefined || ["guide", "summary"].includes(selection.generation_kind)) &&
+        (selection.summary_type === undefined || ["viewpoints", "ideas", "how_to", "mixed"].includes(selection.summary_type)) &&
+        (selection.included_message_ids === undefined ||
+          (selection.included_message_ids.length <= 2_000 &&
+           new Set(selection.included_message_ids).size === selection.included_message_ids.length &&
+           selection.included_message_ids.every(item => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(item))));
       if (!valid) return Promise.reject(new ApiError(0));
       return request("/api/generation/previews/from-selections", parseGenerationPreview, selection);
     },
@@ -753,6 +838,19 @@ export function createClient() {
       if (![id, version_id, output_root_id].every(value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value))) return Promise.reject(new ApiError(0));
       return request(`/api/documents/${encodeURIComponent(id)}/exports`, parseDocumentArtifact,
         { version_id, format, source_mode, output_root_id });
+    },
+    downloadDocument: async (id: string, version_id: string, format: "markdown" | "docx", source_mode: "body_only" | "with_sources") => {
+      if (![id, version_id].every(value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)) ||
+          !["markdown", "docx"].includes(format) || !["body_only", "with_sources"].includes(source_mode)) throw new ApiError(0);
+      const lease = await bootstrap();
+      const response = await fetch(`/api/documents/${encodeURIComponent(id)}/download`, {
+        method: "POST", credentials: "same-origin", cache: "no-store", redirect: "error",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": lease.csrfToken },
+        body: JSON.stringify({ version_id, format, source_mode }),
+      });
+      if (response.status === 401 && lease.generation === latestGeneration) session = undefined;
+      if (!response.ok) throw new ApiError(response.status);
+      return response.blob();
     },
     prepareDeletion: (target_kind: "document" | "batch", target_id: string, include_managed_files: boolean) => {
       if (!["document", "batch"].includes(target_kind) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(target_id))

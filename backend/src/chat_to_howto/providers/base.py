@@ -6,7 +6,7 @@ import asyncio
 from threading import Event, Lock
 from typing import Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ProviderError(RuntimeError):
@@ -42,6 +42,14 @@ class ProviderRequest(BaseModel):
     system_prompt: str = Field(min_length=1, max_length=100_000, repr=False)
     payload: bytes = Field(min_length=1, max_length=10_000_000, repr=False)
     max_output_tokens: int = Field(gt=0, le=1_000_000)
+    thinking: Literal["disabled", "enabled"] = "disabled"
+    reasoning_effort: Literal["low", "high", "max"] | None = None
+
+    @model_validator(mode="after")
+    def _validate_thinking(self) -> "ProviderRequest":
+        if (self.thinking == "enabled") != (self.reasoning_effort is not None):
+            raise ValueError("thinking mode and reasoning effort must be explicitly paired")
+        return self
 
     @field_validator("model", "system_prompt")
     @classmethod

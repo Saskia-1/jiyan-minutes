@@ -24,6 +24,10 @@ documents/generated/
 *.tmp
 
 # Caches and third-party state
+.DS_Store
+/node_modules/
+tools/accessibility_poc/build/
+/test.txt
 .pnpm-store/
 __pycache__/
 *.py[cod]

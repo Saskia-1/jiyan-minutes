@@ -15,6 +15,10 @@ from chat_to_howto.domain.generation import GenerationBudget, GenerationResult, 
 from chat_to_howto.domain.messages import StoredMessage
 from chat_to_howto.services.generation_scope import GenerationScope
 from chat_to_howto.services.generation_redaction import redact_outbound_text
+from chat_to_howto.services.generation_references import (
+    EvidenceReferenceMap,
+    generation_reference_ids,
+)
 
 
 class GenerationBudgetExceeded(ValueError):
@@ -39,6 +43,8 @@ class GenerationSelection(BaseModel):
     included_message_ids: tuple[str, ...] = Field(default=(), max_length=2_000)
     provider: str = Field(min_length=1, max_length=64)
     model: str = Field(min_length=1, max_length=128)
+    thinking: Literal["disabled", "enabled"] = "disabled"
+    reasoning_effort: Literal["low", "high", "max"] | None = None
     redaction_policy_revision: str = Field(min_length=1, max_length=128)
     excluded_message_ids: tuple[str, ...] = Field(default=(), max_length=2_000)
     budget: GenerationBudget
@@ -84,6 +90,8 @@ class GenerationSelection(BaseModel):
 
     @model_validator(mode="after")
     def _validate_range(self) -> "GenerationSelection":
+        if (self.thinking == "enabled") != (self.reasoning_effort is not None):
+            raise ValueError("thinking mode and reasoning effort must be explicitly paired")
         if self.start_time >= self.end_time:
             raise ValueError("generation start must precede end")
         if not self.topic.strip():
@@ -199,6 +207,8 @@ class GenerationScopeBuilder:
             topic=selection.topic,
             provider=selection.provider,
             model=selection.model,
+            thinking=selection.thinking,
+            reasoning_effort=selection.reasoning_effort,
             redaction_policy_revision=selection.redaction_policy_revision,
             conversation_ids=selection.conversation_ids,
             range_start=selection.start_time,
@@ -237,9 +247,21 @@ class GenerationChunk(BaseModel):
 
     chunk_id: str = Field(pattern=r"^chunk:v1:[0-9a-f]{64}$")
     index: int = Field(ge=0)
-    messages: tuple[OutboundMessage, ...] = Field(min_length=1, repr=False)
+    messages: tuple[OutboundMessage, ...] = Field(repr=False)
+    reference_ids: tuple[str, ...] = ()
     estimated_input_tokens: int = Field(gt=0)
     payload: bytes = Field(min_length=1, repr=False)
+
+    @model_validator(mode="after")
+    def _validate_references(self) -> "GenerationChunk":
+        if self.reference_ids:
+            EvidenceReferenceMap.from_pairs(
+                message_ids=(message.message_id for message in self.messages),
+                reference_ids=self.reference_ids,
+            )
+        elif self.messages and json.loads(self.payload).get("summary_type") is not None:
+            raise ValueError("topic generation chunks require short references")
+        return self
 
 
 class GenerationPlan(BaseModel):
@@ -257,13 +279,37 @@ class GenerationPlan(BaseModel):
         return len(self.chunks) + int(self.synthesis_input_tokens > 0)
 
 
-def _chunk_payload(topic: str, messages: tuple[OutboundMessage, ...], generation_kind: str = "guide", summary_type: SummaryType | None = None) -> bytes:
+def _chunk_payload(
+    topic: str,
+    messages: tuple[OutboundMessage, ...],
+    generation_kind: str = "guide",
+    summary_type: SummaryType | None = None,
+    *,
+    reference_ids: tuple[str, ...] | None = None,
+) -> bytes:
+    if summary_type is not None:
+        references = (
+            EvidenceReferenceMap.from_messages(messages).references_for(messages)
+            if reference_ids is None
+            else reference_ids
+        )
+        EvidenceReferenceMap.from_pairs(
+            message_ids=(message.message_id for message in messages),
+            reference_ids=references,
+        )
+    else:
+        if reference_ids:
+            raise ValueError("guide payloads do not accept short references")
+        references = tuple(message.message_id for message in messages)
     payload = {
         "schema_version": 1,
         "topic": topic,
         "messages": [
-            message.model_dump(mode="json")
-            for message in messages
+            {
+                **message.model_dump(mode="json"),
+                "message_id": reference,
+            }
+            for message, reference in zip(messages, references, strict=True)
         ],
     }
     if generation_kind == "summary":
@@ -281,6 +327,53 @@ def _chunk_payload(topic: str, messages: tuple[OutboundMessage, ...], generation
 def estimate_chunk_tokens(topic: str, messages: tuple[OutboundMessage, ...], generation_kind: str = "guide", summary_type: SummaryType | None = None) -> int:
     """Conservative deterministic estimate; it is not presented as exact billing."""
     return ceil(len(_chunk_payload(topic, messages, generation_kind, summary_type).decode("utf-8")) / 1.5)
+
+
+def _synthesis_payload(
+    scope: GenerationScope,
+    *,
+    drafts: tuple[dict[str, object], ...],
+    messages: tuple[OutboundMessage, ...],
+    reference_ids: tuple[str, ...],
+) -> dict[str, object]:
+    EvidenceReferenceMap.from_pairs(
+        message_ids=(message.message_id for message in messages),
+        reference_ids=reference_ids,
+    )
+    evidence_context = []
+    for message, reference in zip(messages, reference_ids, strict=True):
+        item: dict[str, object] = {"reference_id": reference, "text": message.text}
+        if message.speaker is not None:
+            item["speaker"] = message.speaker
+        if message.conversation is not None:
+            item["conversation"] = message.conversation
+        evidence_context.append(item)
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "topic": scope.topic,
+        "summary_type": scope.summary_type,
+        "operation": "synthesize",
+        "evidence_context": evidence_context,
+    }
+    if scope.summary_type == "ideas":
+        units: list[dict[str, object]] = []
+        for draft in drafts:
+            summary = draft.get("summary")
+            if not isinstance(summary, dict):
+                continue
+            for section in summary.get("sections", []):
+                units.append({
+                    "unit_id": f"D{len(units) + 1:03d}",
+                    "heading": section["heading"],
+                    "text": section["text"],
+                    "source_message_ids": section["source_message_ids"],
+                })
+        payload["idea_units"] = units
+    else:
+        payload["drafts"] = list(drafts)
+    if scope.generation_kind == "summary":
+        payload["generation_kind"] = "summary"
+    return payload
 
 
 def build_generation_plan(
@@ -303,18 +396,36 @@ def build_generation_plan(
             total_max_output_tokens=0,
         )
 
+    reference_map = (
+        EvidenceReferenceMap.from_messages(scope.messages)
+        if scope.summary_type is not None
+        else None
+    )
+
+    def payload_for(messages: tuple[OutboundMessage, ...]) -> bytes:
+        return _chunk_payload(
+            scope.topic,
+            messages,
+            scope.generation_kind,
+            scope.summary_type,
+            reference_ids=(reference_map.references_for(messages) if reference_map else None),
+        )
+
+    def tokens_for(messages: tuple[OutboundMessage, ...]) -> int:
+        return ceil(len(payload_for(messages).decode("utf-8")) / 1.5)
+
     groups: list[tuple[OutboundMessage, ...]] = []
     current: tuple[OutboundMessage, ...] = ()
     for message in scope.messages:
         candidate = (*current, message)
-        if estimate_chunk_tokens(scope.topic, candidate, scope.generation_kind, scope.summary_type) <= max_chunk_input_tokens:
+        if tokens_for(candidate) <= max_chunk_input_tokens:
             current = candidate
             continue
         if not current:
             raise GenerationBudgetExceeded("single message exceeds the chunk input budget")
         groups.append(current)
         current = (message,)
-        if estimate_chunk_tokens(scope.topic, current, scope.generation_kind, scope.summary_type) > max_chunk_input_tokens:
+        if tokens_for(current) > max_chunk_input_tokens:
             raise GenerationBudgetExceeded("single message exceeds the chunk input budget")
     if current:
         groups.append(current)
@@ -326,7 +437,8 @@ def build_generation_plan(
 
     chunks: list[GenerationChunk] = []
     for index, messages in enumerate(groups):
-        payload = _chunk_payload(scope.topic, messages, scope.generation_kind, scope.summary_type)
+        payload = payload_for(messages)
+        reference_ids = reference_map.references_for(messages) if reference_map else ()
         identity = json.dumps(
             {
                 "version": 1,
@@ -342,7 +454,8 @@ def build_generation_plan(
                 chunk_id=f"chunk:v1:{sha256(identity).hexdigest()}",
                 index=index,
                 messages=messages,
-                estimated_input_tokens=estimate_chunk_tokens(scope.topic, messages, scope.generation_kind, scope.summary_type),
+                reference_ids=reference_ids,
+                estimated_input_tokens=tokens_for(messages),
                 payload=payload,
             )
         )
@@ -352,7 +465,18 @@ def build_generation_plan(
     max_draft_chars = min(12_000, scope.budget.max_output_tokens * 3) if synthesis else 0
     synthesis_input = 0
     if synthesis:
-        source_chars = len(_chunk_payload(scope.topic, scope.messages, scope.generation_kind, scope.summary_type).decode("utf-8"))
+        assert reference_map is not None
+        source_chars = len(json.dumps(
+            _synthesis_payload(
+                scope,
+                drafts=(),
+                messages=scope.messages,
+                reference_ids=reference_map.references_for(scope.messages),
+            ),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ))
         available_draft_chars = (64_000 * 3 // 2 - source_chars - 256) // len(chunks)
         max_draft_chars = min(max_draft_chars, available_draft_chars)
         if max_draft_chars < 1_000:
@@ -376,20 +500,41 @@ def build_generation_plan(
 
 
 def build_synthesis_chunk(scope: GenerationScope, plan: GenerationPlan, drafts: tuple[GenerationResult, ...]) -> GenerationChunk:
-    """Derived content is bounded before sending; original message scope is unchanged."""
+    """Send validated information units plus only the local evidence they cite."""
     if not plan.synthesis_input_tokens or len(drafts) != len(plan.chunks):
         raise GenerationBudgetExceeded("synthesis plan mismatch")
-    if any(len(draft.model_dump_json()) > plan.max_draft_chars for draft in drafts):
-        raise GenerationBudgetExceeded("intermediate draft exceeds the pre-authorized budget")
-    payload = json.loads(_chunk_payload(scope.topic, scope.messages, scope.generation_kind, scope.summary_type))
-    payload.update(operation="synthesize", drafts=[draft.model_dump(mode="json") for draft in drafts])
+    if scope.summary_type is None:
+        raise GenerationBudgetExceeded("synthesis requires a topic generation contract")
+
+    reference_map = EvidenceReferenceMap.from_messages(scope.messages)
+    encoded_drafts: list[dict[str, object]] = []
+    cited_ids: set[str] = set()
+    for chunk, draft in zip(plan.chunks, drafts, strict=True):
+        allowed = tuple(message.message_id for message in chunk.messages)
+        try:
+            encoded_draft = reference_map.encode_result(draft, allowed_message_ids=allowed)
+        except ValueError as error:
+            raise GenerationBudgetExceeded("intermediate draft cites outside its source chunk") from error
+        if len(encoded_draft.model_dump_json()) > plan.max_draft_chars:
+            raise GenerationBudgetExceeded("intermediate draft exceeds the pre-authorized budget")
+        encoded_drafts.append(encoded_draft.model_dump(mode="json"))
+        cited_ids.update(generation_reference_ids(draft))
+
+    cited_messages = tuple(message for message in scope.messages if message.message_id in cited_ids)
+    cited_references = reference_map.references_for(cited_messages)
+    payload = _synthesis_payload(
+        scope,
+        drafts=tuple(encoded_drafts),
+        messages=cited_messages,
+        reference_ids=cited_references,
+    )
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     estimate = ceil(len(encoded.decode("utf-8")) / 1.5)
     if estimate > plan.synthesis_input_tokens:
         raise GenerationBudgetExceeded("synthesis exceeds the pre-authorized budget")
     return GenerationChunk(
         chunk_id=f"chunk:v1:{sha256(scope.fingerprint().encode() + encoded).hexdigest()}",
-        index=len(plan.chunks), messages=scope.messages,
+        index=len(plan.chunks), messages=cited_messages, reference_ids=cited_references,
         estimated_input_tokens=estimate, payload=encoded,
     )
 

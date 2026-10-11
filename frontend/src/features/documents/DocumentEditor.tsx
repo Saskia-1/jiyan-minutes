@@ -116,6 +116,7 @@ function LegacyDocumentEditor({ api, generationJobId, initialDocument = null, ou
   </section>;
 
   const current = document.current_version;
+  const topicSummary = current.content.summary && "sections" in current.content.summary ? current.content.summary : null;
   const legacySummary = current.content.summary && "core_summary" in current.content.summary ? current.content.summary : null;
   const invalidText = steps.some(item => !item.trim()) ||
     topicSections.some(item => !item.heading.trim() || !item.text.trim()) ||
@@ -123,12 +124,13 @@ function LegacyDocumentEditor({ api, generationJobId, initialDocument = null, ou
   return <section className="document-editor" aria-label="文档编辑与历史">
     <h4>编辑与版本</h4><p className={current.evidence_status === "verified" ? "verified-badge" : "warning"}>{ORIGIN_LABELS[current.origin]}</p>
     <label>文档标题<input value={title} maxLength={500} disabled={busy} onChange={event => setTitle(event.target.value)} /></label>
-    {current.content.summary && "sections" in current.content.summary ? topicSections.map((item, index) => <section key={index}>
+    {topicSummary ? topicSections.map((item, index) => <section key={index}>
       <label>章节标题 {index + 1}<input value={item.heading} maxLength={200} disabled={busy}
         onChange={event => setTopicSections(items => items.map((section, i) => i === index ? { ...section, heading: event.target.value } : section))} /></label>
       <label>章节正文 {index + 1}<textarea value={item.text} maxLength={16_000} disabled={busy}
         onChange={event => setTopicSections(items => items.map((section, i) => i === index ? { ...section, text: event.target.value } : section))} /></label>
-      <EvidenceDrawer label="查看原始依据" evidence={document.source_evidence.filter(evidence => item.source_message_ids.includes(evidence.message_id))} />
+      {topicSummary.summary_type !== "ideas" &&
+        <EvidenceDrawer label="查看原始依据" evidence={document.source_evidence.filter(evidence => item.source_message_ids.includes(evidence.message_id))} />}
     </section>) : legacySummary ? SUMMARY_FIELDS.map(([field, label]) =>
       legacySummary[field].map((item, index) => <div key={`${field}-${index}`}>
         <label>{label} {index + 1}<textarea value={summaryTexts[field][index] || ""} maxLength={8_000} disabled={busy}

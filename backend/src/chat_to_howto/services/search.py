@@ -90,7 +90,7 @@ class ChatSearchService:
         if not isinstance(session_id, str) or not session_id:
             raise PermissionError("local session is unavailable")
         cursor = self._decode_cursor(request)
-        rows = self._repositohanwery.search_messages(
+        rows = self._repository.search_messages(
             session_digest=digest(session_id),
             query=request.query,
             conversation_ids=request.conversation_ids,

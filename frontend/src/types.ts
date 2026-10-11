@@ -90,24 +90,35 @@ export interface ExportJob {
 export interface ChatSearchRequest {
   source_id: ChatSourceId; account_id: string; query: string; conversation_selection_ids: string[];
   start_time: string; end_time: string; limit: number; cursor: string | null;
+  include_undated?: boolean;
 }
 export interface ChatSearchResult {
-  message_id: string; conversation_id: string; timestamp: string; sender_id: string | null;
+  message_id: string; conversation_id: string; timestamp: string | null; sender_id: string | null;
+  source_order?: number;
   sender_name: string | null; text: string | null; batch_id: string; snapshot_id: string;
 }
 export interface ChatSearchPage { results: ChatSearchResult[]; next_cursor: string | null }
+export interface TopicExpansion { topic: string; terms: string[]; degraded: boolean }
+export type SummaryType = "viewpoints" | "ideas" | "how_to" | "mixed";
+export interface GenerationContext { messages: ChatSearchResult[]; added_count: number }
 export const generationStates = ["pending", "checking_cache", "generating", "extracting", "merging", "validating", "complete", "failed", "cancelled"] as const;
 export type GenerationState = typeof generationStates[number];
 export interface GenerationSelectionRequest {
   source_id: ChatSourceId; account_id: string; conversation_selection_ids: string[]; snapshot_id: string;
   start_time: string; end_time: string; topic: string; mode: "fast" | "complete";
   excluded_message_ids: string[];
+  generation_kind?: "guide" | "summary";
+  summary_type?: SummaryType;
+  included_message_ids?: string[];
+  include_undated?: boolean;
 }
 export interface GenerationPreview {
   preview_id: string; scope_fingerprint: string; provider: string; model: string; mode: "fast" | "complete";
+  thinking: "disabled" | "enabled"; reasoning_effort: "low" | "high" | "max" | null;
   message_count: number; character_count: number; estimated_input_tokens: number; max_output_tokens: number;
   provider_calls: number; price_status: "unknown"; estimated_cost: null; cache_hit: boolean;
   will_send_external: boolean; outbound_payloads: string[]; expires_at: string;
+  synthesis_planned?: boolean;
 }
 export interface GenerationConsent {
   consent_id: string; scope_fingerprint: string; outbound_authorized: boolean; expires_at: string;
@@ -127,9 +138,20 @@ export interface HowToConflict {
 export interface HowToResult {
   status: "complete" | "insufficient_evidence"; title: string; preparations: HowToPreparation[];
   steps: HowToStep[]; checks: HowToCheck[]; missing_information: string[]; conflicts: HowToConflict[];
+  summary?: ChatSummary;
+  professional_extensions?: { heading: string; text: string }[];
+  user_text?: string;
 }
+export interface ChatSummaryItem extends HowToEvidenceItem { text: string }
+export interface LegacyChatSummary {
+  core_summary: ChatSummaryItem[]; discussions: ChatSummaryItem[]; decisions: ChatSummaryItem[];
+  action_items: ChatSummaryItem[]; open_questions: ChatSummaryItem[];
+}
+export interface TopicSection extends HowToEvidenceItem { heading: string; text: string }
+export interface TopicSummary { summary_type: Exclude<SummaryType, "how_to">; sections: TopicSection[] }
+export type ChatSummary = LegacyChatSummary | TopicSummary;
 export interface ValidatedEvidence {
-  message_id: string; conversation_id: string; timestamp: string; sender_id: string | null;
+  message_id: string; conversation_id: string; timestamp: string | null; sender_id: string | null;
   sender_name: string | null; quote: string;
 }
 export interface ValidatedGeneration {
@@ -207,12 +229,13 @@ export interface ImportPreview {
     conversations: { conversation_id: string; conversation_name: string | null; message_count: number }[];
     warnings: string[]; issues: ImportIssue[];
     samples: { row_number: number; conversation_name: string | null; sender_name: string | null;
-      timestamp: string; message_type: string; text: string | null }[] };
+      timestamp: string | null; message_type: string; text: string | null }[] };
 }
 export interface ImportCommit {
   import_id: string; batch_id: string; snapshot_id: string; source_id: "manual"; account_id: string;
   range_start: string; range_end: string; display_timezone: string; warnings: string[];
   conversations: { conversation_selection_id: string; display_name: string | null; conversation_type: string | null }[];
+  analysis?: ImportPreview["analysis"];
 }
 export interface ImportRecoveryPage { imports: ImportCommit[]; next_cursor: string | null }
 export function isTrustedRealReport(value: unknown, source: Source | undefined): boolean {

@@ -71,6 +71,7 @@ it("生成预览进行中锁定外层来源和时间范围，完成后解锁", a
 
   finishPreview(new Response(JSON.stringify({
     preview_id: "preview:p2", scope_fingerprint: "a".repeat(64), provider: "fake", model: "deterministic",
+    thinking: "disabled", reasoning_effort: null,
     mode: "complete", message_count: 1, character_count: 6, estimated_input_tokens: 20,
     max_output_tokens: 2000, provider_calls: 1, price_status: "unknown", estimated_cost: null,
     cache_hit: false, will_send_external: true, outbound_payloads: ["{}"], expires_at: "2099-01-01T00:00:00Z",
@@ -166,12 +167,13 @@ it("安全检测较晚返回时只填空白版本，不覆盖用户已输入的�
   await waitFor(() => expect(screen.getByLabelText("本地工具版本")).toHaveValue("0.4.2"));
 });
 
-it("App 与向导共享一个 session，不为 setup-options 和 sources 重复 bootstrap", async () => {
+it("简洁首页共享一个 session，默认不连接 QQ/微信来源", async () => {
   const { default: App } = await loadSubject("App");
   const api = installApi(); vi.stubGlobal("fetch", api.fetch);
   render(<App />);
-  await screen.findByRole("combobox", { name: "数据源" });
-  await waitFor(() => expect(api.requests.filter(item => item.path === "/api/sources")).toHaveLength(1));
+  await screen.findByRole("region", { name: "聊天内容" });
+  await waitFor(() => expect(api.requests.filter(item => item.path === "/api/imports/recovery")).toHaveLength(1));
+  expect(api.requests.filter(item => item.path === "/api/sources")).toHaveLength(0);
   expect(api.requests.filter(item => item.path === "/api/session")).toHaveLength(1);
 });
 
@@ -613,25 +615,29 @@ it("秘密写入成功但非秘密状态刷新失败时保留成功事实且不�
   expect(api.requests.filter(item => item.path.endsWith("/secret-operations"))).toHaveLength(1);
 });
 
-it("App 从同源 setup-options 获取批准目录，文件导入只通过系统选择器", async () => {
+it("App 保留同源配置，首页四区且文件导入只通过系统选择器", async () => {
   const { default: App } = await loadSubject("App");
   const api = installApi(); vi.stubGlobal("fetch", api.fetch);
   render(<App />);
-  await screen.findByRole("combobox", { name: "保存位置" });
+  await screen.findByRole("region", { name: "聊天内容" });
   expect(api.requests.some(item => item.path === "/api/setup-options")).toBe(true);
-  expect(screen.getByRole("option", { name: "已批准的合成目录" })).toHaveValue("fixture-root");
+  expect(screen.getAllByRole("heading", { level: 2 }).map(item => item.textContent)).toEqual([
+    "1. 聊天内容", "2. 关键词 / 整理方向", "3. 是否自行修改和补充？", "4. 预览与下载",
+  ]);
+  expect(screen.getByRole("radio", { name: "授权导入（即将支持）" })).toBeDisabled();
+  expect(screen.queryByRole("combobox", { name: "保存位置" })).not.toBeInTheDocument();
   const fileInput = document.querySelector('input[type="file"]');
   expect(fileInput).toHaveAttribute("accept", ".txt,.json,.jsonl,.csv,.xlsx,.zip");
   expect(document.querySelector('input[placeholder*="/"]')).toBeNull();
 });
 
-it("没有批准目录时停止并说明需要本地配置，不静默替换根目录", async () => {
+it("浏览器下载无需批准输出目录，首页不擅自替换服务端根目录或发起来源验证", async () => {
   const { default: App } = await loadSubject("App");
   const api = installApi(); api.state.setupOptions.approved_output_roots = [];
   vi.stubGlobal("fetch", api.fetch);
   render(<App />);
-  expect(await screen.findByRole("alert")).toHaveTextContent(/批准.*目录|配置.*目录/);
-  const confirm = screen.queryByRole("button", { name: "查看操作确认" });
-  if (confirm) expect(confirm).toBeDisabled();
+  expect(await screen.findByRole("region", { name: "聊天内容" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "开始整理" })).toBeDisabled();
   expect(api.requests.some(item => item.path.endsWith("/verification-jobs"))).toBe(false);
+  expect(api.requests.some(item => item.path.endsWith("/exports"))).toBe(false);
 });

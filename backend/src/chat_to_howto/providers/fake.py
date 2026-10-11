@@ -91,6 +91,21 @@ class FakeProvider:
             summary = isinstance(payload, dict) and payload.get("generation_kind") == "summary"
             summary_type = payload.get("summary_type") if isinstance(payload, dict) else None
             messages = payload.get("messages", []) if isinstance(payload, dict) else []
+            if (
+                isinstance(payload, dict)
+                and payload.get("operation") == "synthesize"
+                and isinstance(payload.get("evidence_context"), list)
+            ):
+                messages = [
+                    {
+                        "message_id": item.get("reference_id"),
+                        "text": item.get("text"),
+                        "speaker": item.get("speaker"),
+                        "conversation": item.get("conversation"),
+                    }
+                    for item in payload["evidence_context"]
+                    if isinstance(item, dict)
+                ]
             first = messages[0] if isinstance(messages, list) and messages else None
             message_id = first.get("message_id") if isinstance(first, dict) else None
         except (TypeError, UnicodeDecodeError, ValueError):
@@ -168,8 +183,13 @@ class FakeProvider:
                     "quote": first_text if isinstance(first_text, str) else "synthetic evidence",
                 }
             ]
+        output = {"result": result} if summary_type else {"result": result, "evidence": evidence}
+        if summary_type == "ideas" and payload.get("operation") == "synthesize":
+            unit_ids = [unit["unit_id"] for unit in payload["idea_units"]]
+            output["idea_grouping"] = [{"unit_ids": unit_ids}] if result["status"] == "complete" else []
+            output["discarded_unit_ids"] = [] if result["status"] == "complete" else unit_ids
         return json.dumps(
-            {"result": result} if summary_type else {"result": result, "evidence": evidence},
+            output,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),

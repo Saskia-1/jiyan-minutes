@@ -32,6 +32,8 @@ class GenerationScope(BaseModel):
     topic: str = Field(repr=False)
     provider: str
     model: str
+    thinking: Literal["disabled", "enabled"] = Field(default="disabled", exclude_if=lambda value: value == "disabled")
+    reasoning_effort: Literal["low", "high", "max"] | None = Field(default=None, exclude_if=lambda value: value is None)
     redaction_policy_revision: str
     conversation_ids: tuple[str, ...]
     range_start: datetime
@@ -56,6 +58,8 @@ class GenerationScope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_sets_and_budget(self) -> "GenerationScope":
+        if (self.thinking == "enabled") != (self.reasoning_effort is not None):
+            raise ValueError("thinking mode and reasoning effort must be explicitly paired")
         if not self.conversation_ids or len(set(self.conversation_ids)) != len(
             self.conversation_ids
         ):

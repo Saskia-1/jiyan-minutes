@@ -42,10 +42,29 @@ def test_runtime_config_loads_only_explicit_nonsecret_settings(tmp_path):
     assert loaded.settings.host == "127.0.0.1"
     assert loaded.settings.llm_provider == "deepseek"
     assert loaded.settings.llm_model == "deepseek-v4-flash"
+    assert loaded.settings.llm_thinking == "disabled"
+    assert loaded.settings.llm_reasoning_effort is None
+    assert loaded.settings.llm_max_output_tokens == 16_000
     assert loaded.settings.data_dir == data.resolve()
     assert loaded.settings.export_root == output.resolve()
     assert loaded.origin == "http://127.0.0.1:8765"
     assert "api_key" not in repr(loaded).lower()
+
+
+def test_runtime_config_accepts_explicit_thinking_acceptance_profile_without_changing_defaults(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    config, _data, _output = _write_config(
+        tmp_path, project, deepseek_model="deepseek-v4-pro",
+        deepseek_thinking="enabled", deepseek_reasoning_effort="max",
+        deepseek_max_output_tokens=64_000,
+    )
+    settings = load_runtime_config(config, project_root=project).settings
+
+    assert settings.llm_model == "deepseek-v4-pro"
+    assert settings.llm_thinking == "enabled"
+    assert settings.llm_reasoning_effort == "max"
+    assert settings.llm_max_output_tokens == 64_000
 
 
 @pytest.mark.parametrize(
@@ -56,6 +75,17 @@ def test_runtime_config_loads_only_explicit_nonsecret_settings(tmp_path):
         {"llm_daily_request_limit": 0},
         {"schema_version": 2},
         {"unexpected": "value"},
+        {"deepseek_thinking": "enabled"},
+        {"deepseek_thinking": "enabled", "deepseek_reasoning_effort": "max"},
+        {"deepseek_reasoning_effort": "max"},
+        {"deepseek_thinking": []},
+        {"deepseek_reasoning_effort": []},
+        {"deepseek_thinking": "enabled", "deepseek_reasoning_effort": "medium"},
+        {"deepseek_thinking": "enabled", "deepseek_reasoning_effort": "max",
+         "deepseek_max_output_tokens": 64_000},
+        {"deepseek_max_output_tokens": 0},
+        {"deepseek_max_output_tokens": True},
+        {"deepseek_max_output_tokens": 400_000},
     ],
 )
 def test_runtime_config_rejects_unreviewed_or_invalid_values(tmp_path, changes):
@@ -85,8 +115,12 @@ def test_runtime_config_rejects_group_readable_file_and_project_internal_data(tm
         load_runtime_config(config, project_root=project)
 
 
+@pytest.mark.parametrize(("thinking", "effort", "timeout", "response_limit"), [
+    ("disabled", None, 180, 1_048_576),
+    ("enabled", "max", 600, 4_194_304),
+])
 def test_runtime_app_exposes_gate1_no_go_blockers_for_both_sources(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, thinking, effort, timeout, response_limit
 ):
     data = tmp_path / "private-data"
     output = tmp_path / "approved-output"
@@ -101,6 +135,8 @@ def test_runtime_app_exposes_gate1_no_go_blockers_for_both_sources(
         tracememo_base_url="http://127.0.0.1:6131",
         llm_provider="deepseek",
         llm_model="deepseek-v4-flash",
+        llm_thinking=thinking,
+        llm_reasoning_effort=effort,
     )
     captured = {}
     provider = object()
@@ -108,8 +144,9 @@ def test_runtime_app_exposes_gate1_no_go_blockers_for_both_sources(
 
     class DeepSeekProviderStub:
         @classmethod
-        def from_environment(cls, *, timeout_seconds):
-            assert timeout_seconds == 180
+        def from_environment(cls, *, timeout_seconds, max_response_bytes):
+            assert timeout_seconds == timeout
+            assert max_response_bytes == response_limit
             return provider
 
     monkeypatch.setattr(

@@ -167,14 +167,17 @@ def render_markdown(version: DocumentVersion, evidence: tuple[ValidatedEvidence,
     lines = [f"# {_md(content.title)}", "", f"版本：{version.ordinal}",
              f"来源：{_origin_label(version.origin)}", f"创建时间：{version.created_at.isoformat()}", ""]
     if content.user_text is not None:
-        lines = [_md(content.user_text), ""]
+        title, blocks = _edited_text_blocks(content.user_text, fallback_title=content.title)
+        lines = [f"# {_md(title)}", ""]
+        for kind, text in blocks:
+            lines += ([f"## {_md(text)}", ""] if kind == "heading" else [_md(text), ""])
     elif content.summary is not None:
         for label, items in summary_groups(content.summary):
             if items:
                 lines += [f"## {_md(label)}", ""]
                 for item in items:
                     lines += [(_md(item.text) if isinstance(content.summary, TopicSummary) else f"- {_md(item.text)}"), ""]
-                    if source_mode == "with_sources" and isinstance(content.summary, TopicSummary):
+                    if source_mode == "with_sources" and isinstance(content.summary, TopicSummary) and content.summary.summary_type != "ideas":
                         lines += [_source_reference(item.source_message_ids, version, evidence), ""]
     else:
         lines += _guide_markdown_body(content)
@@ -226,16 +229,14 @@ def render_docx(version: DocumentVersion, evidence: tuple[ValidatedEvidence, ...
     section.top_margin = section.bottom_margin = Inches(0.8)
     section.left_margin = section.right_margin = Inches(0.85)
     document.core_properties.author = ""; document.core_properties.last_modified_by = ""
-    for style_name in ("Normal", "Title", "Heading 1", "Heading 2"):
-        style = document.styles[style_name]
-        style.font.color.rgb = RGBColor(0, 0, 0)
-        style.font.name = "Hiragino Sans GB"
-        style._element.rPr.rFonts.set(qn("w:eastAsia"), "Hiragino Sans GB")
+    _set_document_fonts(document)
     document.styles["Normal"].font.size = Pt(11)
     document.styles["Title"].font.size = Pt(24)
     if content.user_text is not None:
-        for index, line in enumerate(content.user_text.splitlines()):
-            document.add_paragraph(line, style="Title" if index == 0 else "Normal")
+        title, blocks = _edited_text_blocks(content.user_text, fallback_title=content.title)
+        document.add_paragraph(title, style="Title")
+        for kind, text in blocks:
+            document.add_paragraph(text, style="Heading 1" if kind == "heading" else "Normal")
     else:
         document.add_paragraph(content.title, style="Title")
         document.add_paragraph(f"版本 {version.ordinal} · {_origin_label(version.origin)} · {version.created_at.isoformat()}")
@@ -247,7 +248,7 @@ def render_docx(version: DocumentVersion, evidence: tuple[ValidatedEvidence, ...
                 document.add_heading(label, level=1)
                 for item in items:
                     document.add_paragraph(item.text, style="Normal" if isinstance(content.summary, TopicSummary) else "List Bullet")
-                    if source_mode == "with_sources" and isinstance(content.summary, TopicSummary):
+                    if source_mode == "with_sources" and isinstance(content.summary, TopicSummary) and content.summary.summary_type != "ideas":
                         document.add_paragraph(_source_reference(item.source_message_ids, version, evidence))
     else:
         _add_guide_docx_body(document, content)
@@ -266,6 +267,30 @@ def render_docx(version: DocumentVersion, evidence: tuple[ValidatedEvidence, ...
             document.add_paragraph(f"消息标识：{item.message_id}")
     buffer = BytesIO(); document.save(buffer)
     return _strip_docx_rsids(buffer.getvalue())
+
+
+def _set_document_fonts(document: Document) -> None:
+    font_name = "Hiragino Sans GB"
+    names = ("Normal", "Title", "Heading 1", "Heading 2", "Title Char", "Heading 1 Char", "Heading 2 Char")
+    for style_name in names:
+        style = document.styles[style_name]
+        style.font.name = font_name
+        style.font.color.rgb = RGBColor(0, 0, 0)
+        fonts = style._element.get_or_add_rPr().get_or_add_rFonts()
+        _set_explicit_fonts(fonts, font_name)
+        color = style._element.rPr.color
+        if color is not None:
+            for attribute in ("themeColor", "themeTint", "themeShade"):
+                color.attrib.pop(qn(f"w:{attribute}"), None)
+    for default in document.styles._element.xpath("./w:docDefaults/w:rPrDefault/w:rPr/w:rFonts"):
+        _set_explicit_fonts(default, font_name)
+
+
+def _set_explicit_fonts(fonts, font_name: str) -> None:
+    for attribute in ("asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme", "csTheme"):
+        fonts.attrib.pop(qn(f"w:{attribute}"), None)
+    for attribute in ("ascii", "hAnsi", "eastAsia", "cs"):
+        fonts.set(qn(f"w:{attribute}"), font_name)
 
 
 def _add_guide_docx_body(document, content) -> None:
@@ -292,6 +317,41 @@ def _add_guide_docx_body(document, content) -> None:
             document.add_paragraph(f"说法 A：{item.claim_a}")
             document.add_paragraph(f"说法 B：{item.claim_b}")
             document.add_paragraph(f"处理：{item.resolution or '尚未解析'}")
+
+
+def _edited_text_blocks(value: str, *, fallback_title: str) -> tuple[str, tuple[tuple[str, str], ...]]:
+    """Parse only explicit edit markers; legacy text never gets guessed headings."""
+    lines = value.splitlines()
+    first_content = next((index for index, line in enumerate(lines) if line.strip()), None)
+    explicit_title = (
+        first_content is not None
+        and lines[first_content].startswith("# ")
+        and not lines[first_content].startswith("## ")
+        and bool(lines[first_content][2:].strip())
+    )
+    title = lines[first_content][2:].strip() if explicit_title and first_content is not None else fallback_title
+    start = first_content + 1 if explicit_title and first_content is not None else 0
+    blocks: list[tuple[str, str]] = []
+    paragraph: list[str] = []
+
+    def flush_paragraph() -> None:
+        text = "\n".join(paragraph).strip()
+        if text:
+            blocks.append(("paragraph", text))
+        paragraph.clear()
+
+    for line in lines[start:]:
+        if explicit_title and line.startswith("## ") and line[3:].strip():
+            flush_paragraph()
+            blocks.append(("heading", line[3:].strip()))
+        elif not line.strip():
+            flush_paragraph()
+        else:
+            paragraph.append(line)
+    flush_paragraph()
+    if not explicit_title and blocks and blocks[0] == ("paragraph", fallback_title):
+        blocks.pop(0)
+    return title, tuple(blocks)
 
 
 def _used_evidence(version: DocumentVersion, evidence: tuple[ValidatedEvidence, ...]) -> tuple[ValidatedEvidence, ...]:

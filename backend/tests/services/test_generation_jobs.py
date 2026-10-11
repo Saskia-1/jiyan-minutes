@@ -30,11 +30,57 @@ CHAT_TEXT = "synthetic target instruction"
 OUTSIDE_CHAT_TEXT = "synthetic instruction outside generation time"
 
 
+class RecordingFakeProvider(FakeProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.system_prompts: list[str] = []
+        self.request_profiles: list[tuple[str, str, str | None, int]] = []
+
+    async def generate(self, request, cancellation):
+        self.system_prompts.append(request.system_prompt)
+        self.request_profiles.append((request.model, request.thinking, request.reasoning_effort,
+                                      request.max_output_tokens))
+        return await super().generate(request, cancellation)
+
+
+def test_thinking_profile_is_frozen_and_sent_for_both_chunks_and_synthesis(tmp_path):
+    repository, _ = _repository_with_snapshot(tmp_path)
+    provider = RecordingFakeProvider()
+    settings = _cache_settings().model_copy(update={"max_chunk_input_tokens": 180})
+    orchestrator = GenerationJobOrchestrator(
+        repository=repository, provider_factory=lambda _: provider,
+        cache_settings=settings, clock=lambda: NOW,
+    )
+    selection = _selection().model_copy(update={
+        "summary_type": "ideas", "model": "deepseek-v4-pro", "thinking": "enabled",
+        "reasoning_effort": "max", "end_time": datetime(2026, 9, 3, tzinfo=UTC),
+        "budget": GenerationBudget(max_messages=100, max_input_tokens=100_000,
+                                   max_provider_calls=3, max_output_tokens=64_000),
+    })
+    try:
+        preview = orchestrator.create_preview(selection, session_id="session-a")
+        assert preview.provider_calls == 3
+        assert (preview.model, preview.thinking, preview.reasoning_effort) == (
+            "deepseek-v4-pro", "enabled", "max")
+        assert preview.max_output_tokens == 192_000
+        consent = orchestrator.issue_consent(preview.preview_id, session_id="session-a", confirmed=True)
+        job = orchestrator.start_job(consent.consent_id, session_id="session-a", idempotency_key="thinking-profile")
+        completed = orchestrator.run_job(job.job_id)
+
+        assert completed.state == "complete", completed.error_code
+        assert provider.request_profiles == [("deepseek-v4-pro", "enabled", "max", 64_000)] * 3
+        assert orchestrator.create_preview(selection, session_id="session-a").cache_hit is True
+        assert orchestrator.create_preview(selection.model_copy(update={"reasoning_effort": "high"}),
+                                           session_id="session-a").cache_hit is False
+    finally:
+        repository.close()
+
+
 @pytest.mark.parametrize("summary_type", ["viewpoints", "ideas", "how_to", "mixed"])
 def test_topic_directions_share_chunk_synthesis_evidence_and_cache(tmp_path, summary_type):
     repository, _ = _repository_with_snapshot(tmp_path)
-    provider = FakeProvider()
-    settings = _cache_settings().model_copy(update={"max_chunk_input_tokens": 240})
+    provider = RecordingFakeProvider()
+    settings = _cache_settings().model_copy(update={"max_chunk_input_tokens": 180})
     orchestrator = GenerationJobOrchestrator(
         repository=repository, provider_factory=lambda _: provider,
         cache_settings=settings, clock=lambda: NOW,
@@ -52,10 +98,29 @@ def test_topic_directions_share_chunk_synthesis_evidence_and_cache(tmp_path, sum
         completed = orchestrator.run_job(job.job_id)
         assert completed.state == "complete", completed.error_code
         assert provider.call_count == 3
+        mode_label = {
+            "viewpoints": "【当前模式：观点整理】",
+            "ideas": "【当前模式：Idea / 想法整理】",
+            "how_to": "【当前模式：方法论 / 怎么做】",
+            "mixed": "【当前模式：综合整理】",
+        }[summary_type]
+        assert all(mode_label in prompt for prompt in provider.system_prompts)
+        assert all("【分块草稿阶段】" in prompt for prompt in provider.system_prompts[:2])
+        assert all("【最终表达规则】" not in prompt for prompt in provider.system_prompts[:2])
+        assert "【跨块最终整合阶段】" in provider.system_prompts[-1]
+        assert "【最终表达规则】" in provider.system_prompts[-1]
         synthesis = json.loads(provider.request_payloads[-1])
         assert synthesis["operation"] == "synthesize"
-        assert len(synthesis["drafts"]) == 2
-        assert len(synthesis["messages"]) == 2
+        if summary_type == "ideas":
+            assert "drafts" not in synthesis
+            assert len(synthesis["idea_units"]) == 2
+        else:
+            assert len(synthesis["drafts"]) == 2
+        assert "messages" not in synthesis
+        assert len(synthesis["evidence_context"]) == 2
+        assert [item["reference_id"] for item in synthesis["evidence_context"]] == ["E001", "E002"]
+        assert all(item["message_id"].startswith("E") for payload in provider.request_payloads[:2]
+                   for item in json.loads(payload)["messages"])
         assert len(completed.result.evidence) == 2
         if summary_type == "how_to":
             assert completed.result.result.summary is None
@@ -67,6 +132,32 @@ def test_topic_directions_share_chunk_synthesis_evidence_and_cache(tmp_path, sum
         assert cached.cache_hit is True
         other = selection.model_copy(update={"summary_type": "ideas" if summary_type != "ideas" else "viewpoints"})
         assert not orchestrator.create_preview(other, session_id="session-a").cache_hit
+    finally:
+        repository.close()
+
+
+@pytest.mark.parametrize("summary_type", ["viewpoints", "ideas", "how_to", "mixed"])
+def test_topic_directions_use_single_final_stage_without_draft_or_synthesis(tmp_path, summary_type):
+    repository, _ = _repository_with_snapshot(tmp_path)
+    provider = RecordingFakeProvider()
+    orchestrator = _orchestrator(repository, provider)
+    selection = _selection().model_copy(update={"summary_type": summary_type})
+    try:
+        preview = orchestrator.create_preview(selection, session_id="session-a")
+        assert preview.synthesis_planned is False
+        assert preview.provider_calls == 1
+        consent = orchestrator.issue_consent(preview.preview_id, session_id="session-a", confirmed=True)
+        job = orchestrator.start_job(consent.consent_id, session_id="session-a", idempotency_key="single-topic-test")
+
+        completed = orchestrator.run_job(job.job_id)
+
+        assert completed.state == "complete", completed.error_code
+        assert provider.call_count == 1
+        prompt = provider.system_prompts[0]
+        assert "【单块最终阶段】" in prompt
+        assert "【最终表达规则】" in prompt
+        assert "【分块草稿阶段】" not in prompt
+        assert "【跨块最终整合阶段】" not in prompt
     finally:
         repository.close()
 
@@ -96,6 +187,58 @@ def test_topic_extraction_rejects_invalid_direction_or_model_written_evidence(tm
         assert failed.error_code == error_code
         assert failed.result is None
         assert provider.call_count == 1
+    finally:
+        repository.close()
+
+
+def test_job_restores_real_ids_and_rehydrates_original_sender_time_and_body(tmp_path):
+    repository, message_id = _repository_with_snapshot(tmp_path)
+    provider = FakeProvider()
+    orchestrator = _orchestrator(repository, provider)
+    selection = _selection().model_copy(update={
+        "summary_type": "ideas", "included_message_ids": (message_id,),
+    })
+    try:
+        preview = orchestrator.create_preview(selection, session_id="session-a")
+        outbound = json.loads(preview.outbound_payloads[0])
+        assert outbound["messages"][0]["message_id"] == "E001"
+        assert message_id not in preview.outbound_payloads[0]
+        consent = orchestrator.issue_consent(preview.preview_id, session_id="session-a", confirmed=True)
+        job = orchestrator.start_job(consent.consent_id, session_id="session-a", idempotency_key="short-ref-e2e")
+
+        completed = orchestrator.run_job(job.job_id)
+
+        assert completed.state == "complete", completed.error_code
+        assert completed.result.result.summary.sections[0].source_message_ids == (message_id,)
+        evidence = completed.result.evidence[0]
+        assert evidence.message_id == message_id
+        assert evidence.sender_name == "Synthetic Sender"
+        assert evidence.timestamp == datetime(2026, 9, 1, 1, tzinfo=UTC)
+        assert evidence.quote == CHAT_TEXT
+    finally:
+        repository.close()
+
+
+def test_pending_job_with_old_generation_contract_fails_before_provider_call(tmp_path):
+    repository, _ = _repository_with_snapshot(tmp_path)
+    old = _orchestrator(repository, FakeProvider())
+    preview = old.create_preview(_selection().model_copy(update={"summary_type": "ideas"}), session_id="session-a")
+    consent = old.issue_consent(preview.preview_id, session_id="session-a", confirmed=True)
+    pending = old.start_job(consent.consent_id, session_id="session-a", idempotency_key="old-contract")
+    new_provider = FakeProvider()
+    new_settings = _cache_settings().model_copy(update={
+        "prompt_version": "topic-editorial-v8",
+        "chunk_strategy_version": "message-boundary-synthesis-v3-short-references",
+    })
+    current = GenerationJobOrchestrator(
+        repository=repository, provider_factory=lambda _: new_provider,
+        cache_settings=new_settings, clock=lambda: NOW,
+    )
+    try:
+        failed = current.run_job(pending.job_id)
+        assert failed.state == "failed"
+        assert failed.error_code == "job_invalid"
+        assert new_provider.call_count == 0
     finally:
         repository.close()
 

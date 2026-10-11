@@ -117,6 +117,17 @@ def test_cache_key_invalidates_every_required_identity_dimension() -> None:
         assert build_cache_identity(scope, _settings(**{field: value})).cache_key != base
 
 
+def test_cache_separates_model_thinking_and_reasoning_effort() -> None:
+    disabled = _scope(model="deepseek-v4-pro")
+    high = _scope(model="deepseek-v4-pro", thinking="enabled", reasoning_effort="high")
+    maximum = _scope(model="deepseek-v4-pro", thinking="enabled", reasoning_effort="max")
+    keys = {build_cache_identity(scope, _settings()).cache_key for scope in (disabled, high, maximum)}
+    keys.add(build_cache_identity(_scope(), _settings()).cache_key)
+
+    assert len(keys) == 4
+    assert len({scope.fingerprint() for scope in (disabled, high, maximum)}) == 3
+
+
 def test_only_exact_same_session_verified_result_is_a_cache_hit() -> None:
     repository = CacheRepositoryStub()
     cache = GenerationCache(repository)

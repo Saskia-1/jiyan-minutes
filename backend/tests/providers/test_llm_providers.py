@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import asdict
 from unittest import mock
 
 import httpx
@@ -187,6 +188,64 @@ def test_deepseek_uses_fixed_endpoint_bearer_auth_json_output_and_no_ambient_sta
     assert len(seen) == 2
 
 
+def test_deepseek_thinking_profile_sends_exact_parameters_and_only_returns_final_content(caplog) -> None:
+    private_reasoning = "private reasoning must never enter a document or log"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert str(request.url) == "https://api.deepseek.com/chat/completions"
+        assert body["model"] == "deepseek-v4-pro"
+        assert body["thinking"] == {"type": "enabled"}
+        assert body["reasoning_effort"] == "max"
+        assert body["max_tokens"] == 64_000
+        assert body["response_format"] == {"type": "json_object"}
+        assert body["stream"] is False
+        assert "temperature" not in body
+        assert request.extensions["timeout"] == {
+            "connect": 600.0, "read": 600.0, "write": 600.0, "pool": 600.0,
+        }
+        return httpx.Response(200, json={
+            "id": "thinking-response", "model": "deepseek-v4-pro",
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {
+                "role": "assistant", "reasoning_content": private_reasoning,
+                "content": '{"result":{"status":"complete"}}',
+            }}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 500,
+                      "completion_tokens_details": {"reasoning_tokens": 450}},
+        })
+
+    provider = DeepSeekProvider(api_key=SENTINEL_KEY, timeout_seconds=600,
+                                max_response_bytes=4_194_304, transport=httpx.MockTransport(handler))
+    response = _run(provider.generate(_request(model="deepseek-v4-pro", thinking="enabled",
+                                               reasoning_effort="max", max_output_tokens=64_000), CancellationToken()))
+
+    assert response.content == '{"result":{"status":"complete"}}'
+    assert private_reasoning not in repr(response)
+    assert private_reasoning not in response.model_dump_json()
+    assert private_reasoning not in caplog.text
+    assert response.completion_tokens == 500  # includes the provider's reasoning tokens
+
+
+def test_deepseek_thinking_rejects_a_reported_model_downgrade() -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "model": "deepseek-flash", "choices": [{"finish_reason": "stop",
+                "message": {"content": '{"result":{}}', "reasoning_content": "private"}}],
+        })
+
+    provider = DeepSeekProvider(api_key=SENTINEL_KEY, transport=httpx.MockTransport(handler))
+    with pytest.raises(ProviderMalformedOutput):
+        _run(provider.generate(_request(model="deepseek-v4-pro", thinking="enabled",
+                                            reasoning_effort="max"), CancellationToken()))
+
+
+def test_thinking_request_requires_explicit_effort_and_disabled_request_rejects_effort() -> None:
+    with pytest.raises(ValueError):
+        _request(thinking="enabled")
+    with pytest.raises(ValueError):
+        _request(reasoning_effort="max")
+
+
 def test_deepseek_cancels_an_inflight_request() -> None:
     entered = asyncio.Event()
 
@@ -219,6 +278,11 @@ def test_deepseek_cancels_an_inflight_request() -> None:
         httpx.Response(
             200,
             json={"choices": [{"finish_reason": "stop", "message": {"content": None}}]},
+        ),
+        httpx.Response(
+            200,
+            json={"choices": [{"finish_reason": "stop", "message": {
+                "content": None, "reasoning_content": "private reasoning is not the final answer"}}]},
         ),
     ],
 )
@@ -255,6 +319,61 @@ def test_deepseek_maps_timeout_and_http_failure_to_body_free_errors() -> None:
         _run(failure_provider.generate(_request(), CancellationToken()))
     assert SENTINEL_CHAT not in str(timeout_error.value)
     assert SENTINEL_CHAT not in str(failure_error.value)
+
+
+def test_deepseek_http_failure_keeps_only_safe_diagnostic_metadata(caplog) -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, json={"error": {
+            "code": "invalid_request_error", "type": "invalid_request_error",
+            "message": "repeated private chat: " + SENTINEL_CHAT + " and " + SENTINEL_KEY,
+        }})
+
+    provider = DeepSeekProvider(api_key=SENTINEL_KEY, transport=httpx.MockTransport(handler))
+    with pytest.raises(ProviderFailure) as raised:
+        _run(provider.generate(_request(), CancellationToken()))
+
+    diagnostic = getattr(raised.value, "diagnostic", None)
+    assert diagnostic is not None
+    assert diagnostic.phase == "http_status"
+    assert diagnostic.exception_type == "HTTPResponseStatus"
+    assert diagnostic.http_status == 422
+    assert diagnostic.service_error_code == "invalid_request_error"
+    assert diagnostic.service_error_type == "invalid_request_error"
+    assert diagnostic.status_note == "invalid_parameters"
+    assert diagnostic.response_headers_received is True
+    assert diagnostic.response_body_complete is True
+    assert diagnostic.received_bytes > 0
+    assert diagnostic.elapsed_ms >= 0
+    assert diagnostic.code_position == "deepseek._send.http_status"
+    assert SENTINEL_CHAT not in str(raised.value)
+    assert SENTINEL_CHAT not in str(asdict(diagnostic))
+    assert SENTINEL_KEY not in str(asdict(diagnostic))
+    assert '"http_status": 422' in caplog.text
+    assert SENTINEL_CHAT not in caplog.text
+    assert SENTINEL_KEY not in caplog.text
+
+
+def test_deepseek_connect_failure_keeps_stage_without_exception_text(caplog) -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("private chat: " + SENTINEL_CHAT)
+
+    provider = DeepSeekProvider(api_key=SENTINEL_KEY, transport=httpx.MockTransport(handler))
+    with pytest.raises(ProviderFailure) as raised:
+        _run(provider.generate(_request(), CancellationToken()))
+
+    diagnostic = getattr(raised.value, "diagnostic", None)
+    assert diagnostic is not None
+    assert diagnostic.phase == "connect"
+    assert diagnostic.exception_type == "ConnectError"
+    assert diagnostic.http_status is None
+    assert diagnostic.response_headers_received is False
+    assert diagnostic.received_bytes == 0
+    assert diagnostic.response_body_complete is False
+    assert diagnostic.code_position == "deepseek._send.await_headers"
+    assert SENTINEL_CHAT not in str(raised.value)
+    assert SENTINEL_CHAT not in str(asdict(diagnostic))
+    assert '"phase": "connect"' in caplog.text
+    assert SENTINEL_CHAT not in caplog.text
 
 
 def test_deepseek_rejects_oversized_response() -> None:

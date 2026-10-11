@@ -51,11 +51,12 @@ it("简洁导入无时间聊天默认折叠，展开排除后只整理剩余消�
   expect(screen.getAllByText("时间未知")).toHaveLength(2);
   await user.click(screen.getAllByRole("checkbox", { name: "排除此消息" })[1]);
   await user.type(screen.getByRole("textbox", { name: "关键词" }), "音乐");
+  expect(screen.getByRole("checkbox", { name: /自动扩展相关关键词/ })).not.toBeChecked();
   await user.click(screen.getByRole("button", { name: "开始整理" }));
   await waitFor(() => expect(api.previewGeneration).toHaveBeenCalledWith(expect.objectContaining({
     summary_type: "ideas", include_undated: true, excluded_message_ids: ["message:1"], included_message_ids: ["message:0", "message:1"],
   })));
-  expect(screen.getByText(/扩展暂不可用/)).toBeVisible();
+  expect(api.expandTopic).not.toHaveBeenCalled();
   expect(screen.getByRole("button", { name: "重新整理" })).toBeEnabled();
 });
 

@@ -10,9 +10,10 @@ import stat
 from zipfile import ZipFile
 
 from docx import Document
+from docx.oxml.ns import qn
 
 from chat_to_howto.domain.documents import DocumentVersion, HowToDocument
-from chat_to_howto.domain.generation import Check, Conflict, GenerationResult, Preparation, Step, ProfessionalExtension
+from chat_to_howto.domain.generation import Check, Conflict, GenerationResult, Preparation, Step, ProfessionalExtension, TopicSection, TopicSummary
 from chat_to_howto.services.artifacts import ApprovedOutputRoot
 from chat_to_howto.services.document_export import (
     DocumentExportService,
@@ -57,6 +58,15 @@ def _all_docx_text(payload: bytes) -> str:
     return "\n".join(paragraph.text for paragraph in document.paragraphs)
 
 
+def _edited_version(user_text: str, *, title: str = "已保存标题") -> DocumentVersion:
+    original = _document().current_version
+    return original.model_copy(update={
+        "origin": "user_edited",
+        "evidence_status": "unverified",
+        "content": original.content.model_copy(update={"title": title, "user_text": user_text}),
+    })
+
+
 def test_professional_extension_is_labeled_and_not_added_to_original_evidence():
     doc = _document()
     content = doc.current_version.content.model_copy(update={"professional_extensions": (
@@ -95,6 +105,85 @@ def test_docx_has_readable_hierarchy_multilingual_text_and_no_private_metadata()
         assert b"Saskia" not in core
         assert b"/Users/" not in b"".join(archive.read(name) for name in archive.namelist() if name.endswith(".xml"))
         assert b"rsid" not in archive.read("word/document.xml")
+
+
+def test_marked_user_edit_renders_real_markdown_and_docx_hierarchy_without_visible_markers() -> None:
+    version = _edited_version(
+        "# 编辑后的标题\n\n## 1. 核心主题：先表达概括\n\n第一段。\n\n第二段。",
+        title="编辑后的标题",
+    )
+
+    markdown = render_markdown(version, (), source_mode="body_only").decode()
+    assert markdown == "# 编辑后的标题\n\n## 1\\. 核心主题：先表达概括\n\n第一段。\n\n第二段。\n"
+
+    document = Document(BytesIO(render_docx(version, (), source_mode="body_only")))
+    assert [(paragraph.style.name, paragraph.text) for paragraph in document.paragraphs] == [
+        ("Title", "编辑后的标题"),
+        ("Heading 1", "1. 核心主题：先表达概括"),
+        ("Normal", "第一段。"),
+        ("Normal", "第二段。"),
+    ]
+    assert "#" not in _all_docx_text(render_docx(version, (), source_mode="body_only"))
+
+
+def test_ideas_export_keeps_internal_sources_but_omits_per_idea_citation_lines() -> None:
+    original = _document()
+    content = original.current_version.content.model_copy(update={
+        "steps": (), "preparations": (), "checks": (), "conflicts": (), "missing_information": (),
+        "summary": TopicSummary(summary_type="ideas", sections=(
+            TopicSection(heading="1. 场景提醒", text="在特定位置提醒用户。", source_message_ids=(MESSAGE_ID,)),
+            TopicSection(heading="2. English 2 与中文标点：另一构思", text="根据既有记录生成摘要。", source_message_ids=(MESSAGE_ID,)),
+        )),
+    })
+    version = original.current_version.model_copy(update={"content": content})
+
+    markdown = render_markdown(version, original.source_evidence, source_mode="with_sources").decode()
+    docx = Document(BytesIO(render_docx(version, original.source_evidence, source_mode="with_sources")))
+
+    assert "依据：" not in markdown
+    assert "依据：" not in "\n".join(paragraph.text for paragraph in docx.paragraphs)
+    assert "## 来源证据" in markdown
+    assert "完整证据" in markdown
+    assert any(paragraph.text == "完整证据 <tag> & **literal**" for paragraph in docx.paragraphs)
+    assert [paragraph.style.name for paragraph in docx.paragraphs if paragraph.text.startswith(("1. 场景", "2. English"))] == [
+        "Heading 1", "Heading 1",
+    ]
+
+
+def test_docx_title_and_mixed_language_idea_headings_have_one_explicit_font_contract() -> None:
+    original = _document()
+    content = original.current_version.content.model_copy(update={
+        "steps": (), "preparations": (), "checks": (), "conflicts": (), "missing_information": (),
+        "summary": TopicSummary(summary_type="ideas", sections=(
+            TopicSection(heading="1. 短标题", text="正文。", source_message_ids=(MESSAGE_ID,)),
+            TopicSection(heading="2. English 2026 与中文标点：这是一个需要自然换行的较长 Idea 标题", text="正文。", source_message_ids=(MESSAGE_ID,)),
+        )),
+    })
+    version = original.current_version.model_copy(update={"content": content})
+    docx = Document(BytesIO(render_docx(version, original.source_evidence, source_mode="body_only")))
+
+    assert [paragraph.style.name for paragraph in docx.paragraphs if paragraph.text.startswith(("1. 短", "2. English"))] == [
+        "Heading 1", "Heading 1",
+    ]
+    assert docx.styles["Heading 1"].font.size > docx.styles["Normal"].font.size
+    for style_name in ("Normal", "Title", "Heading 1", "Heading 2", "Title Char", "Heading 1 Char", "Heading 2 Char"):
+        fonts = docx.styles[style_name]._element.rPr.rFonts
+        assert {fonts.get(qn(f"w:{attribute}")) for attribute in ("ascii", "hAnsi", "eastAsia", "cs")} == {"Hiragino Sans GB"}
+        assert not any(fonts.get(qn(f"w:{attribute}")) for attribute in
+                       ("asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme"))
+
+
+def test_legacy_user_edit_uses_saved_title_and_never_guesses_body_headings() -> None:
+    version = _edited_version("已保存标题\n\n看起来像章节\n\n普通正文")
+
+    markdown = render_markdown(version, (), source_mode="body_only").decode()
+    assert markdown == "# 已保存标题\n\n看起来像章节\n\n普通正文\n"
+    document = Document(BytesIO(render_docx(version, (), source_mode="body_only")))
+    assert [(paragraph.style.name, paragraph.text) for paragraph in document.paragraphs] == [
+        ("Title", "已保存标题"),
+        ("Normal", "看起来像章节"),
+        ("Normal", "普通正文"),
+    ]
 
 
 class DocumentStub:

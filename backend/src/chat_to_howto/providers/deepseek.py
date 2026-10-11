@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict, dataclass
 import json
+import logging
 import math
 import os
+import time
 from typing import Any
 
 import httpx
@@ -23,9 +26,76 @@ from chat_to_howto.providers.base import (
 
 
 _ENDPOINT = "https://api.deepseek.com/chat/completions"
+_LOGGER = logging.getLogger(__name__)
 _FINISH_REASONS = frozenset(
     {"stop", "length", "content_filter", "tool_calls", "insufficient_system_resource"}
 )
+_SAFE_ERROR_TOKENS = frozenset({
+    "invalid_request_error", "authentication_error", "invalid_api_key",
+    "insufficient_balance", "rate_limit_error", "server_error",
+    "service_unavailable_error", "model_not_found",
+})
+_STATUS_NOTES = {
+    400: "invalid_format", 401: "authentication_failed", 402: "insufficient_balance",
+    422: "invalid_parameters", 429: "rate_limit", 500: "server_error",
+    503: "server_overloaded",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class DeepSeekFailureDiagnostic:
+    """Body-free metadata for private diagnosis; never a public API error."""
+
+    phase: str
+    exception_type: str
+    http_status: int | None
+    service_error_code: str | None
+    service_error_type: str | None
+    status_note: str | None
+    elapsed_ms: int
+    received_bytes: int
+    response_headers_received: bool
+    response_body_complete: bool
+    code_position: str
+
+
+class DeepSeekRequestFailure(ProviderFailure):
+    def __init__(self, diagnostic: DeepSeekFailureDiagnostic) -> None:
+        super().__init__("Provider request failed.")
+        self.diagnostic = diagnostic
+
+
+def _record_failure(diagnostic: DeepSeekFailureDiagnostic) -> DeepSeekRequestFailure:
+    _LOGGER.warning("DeepSeek provider failure: %s", json.dumps(asdict(diagnostic), sort_keys=True))
+    return DeepSeekRequestFailure(diagnostic)
+
+
+async def _read_safe_error_metadata(response: httpx.Response) -> tuple[int, bool, str | None, str | None]:
+    """Inspect a small error envelope, never retaining its free-text message."""
+    body = bytearray()
+    bytes_read = 0
+    try:
+        async with asyncio.timeout(3):
+            async for chunk in response.aiter_bytes():
+                bytes_read += len(chunk)
+                if len(body) + len(chunk) > 16_384:
+                    return bytes_read, False, None, None
+                body.extend(chunk)
+    except (TimeoutError, httpx.RequestError):
+        return bytes_read, False, None, None
+    try:
+        envelope = json.loads(body)
+        error = envelope.get("error") if isinstance(envelope, dict) else None
+        if not isinstance(error, dict):
+            return bytes_read, True, None, None
+        code, kind = error.get("code"), error.get("type")
+        return (
+            bytes_read, True,
+            code if isinstance(code, str) and code in _SAFE_ERROR_TOKENS else None,
+            kind if isinstance(kind, str) and kind in _SAFE_ERROR_TOKENS else None,
+        )
+    except (TypeError, ValueError):
+        return bytes_read, True, None, None
 
 
 class DeepSeekProvider:
@@ -112,6 +182,11 @@ class DeepSeekProvider:
                     task.cancel()
 
     async def _send(self, request: ProviderRequest) -> ProviderResponse:
+        started = time.monotonic()
+        headers_received = False
+        response_status: int | None = None
+        bytes_read = 0
+        stage = "await_headers"
         body = {
             "model": request.model,
             "messages": [
@@ -119,13 +194,15 @@ class DeepSeekProvider:
                 {"role": "user", "content": request.payload.decode("utf-8")},
             ],
             "response_format": {"type": "json_object"},
-            # The bounded output budget is for the structured document, not hidden reasoning.
-            "thinking": {"type": "disabled"},
-            # This adapter produces grounded structured data, not creative chat.
-            "temperature": 0,
+            "thinking": {"type": request.thinking},
             "max_tokens": request.max_output_tokens,
             "stream": False,
         }
+        if request.thinking == "enabled":
+            body["reasoning_effort"] = request.reasoning_effort
+        else:
+            # Preserve the existing deterministic non-thinking request.
+            body["temperature"] = 0
         try:
             async with httpx.AsyncClient(
                 transport=self._transport,
@@ -142,10 +219,24 @@ class DeepSeekProvider:
                     },
                     json=body,
                 ) as response:
+                    headers_received = True
+                    response_status = response.status_code
                     if not 200 <= response.status_code < 300:
-                        raise ProviderFailure("Provider request failed.")
+                        bytes_read, body_complete, error_code, error_type = await _read_safe_error_metadata(response)
+                        raise _record_failure(DeepSeekFailureDiagnostic(
+                            phase="http_status", exception_type="HTTPResponseStatus",
+                            http_status=response.status_code, service_error_code=error_code,
+                            service_error_type=error_type,
+                            status_note=_STATUS_NOTES.get(response.status_code, "http_error"),
+                            elapsed_ms=max(0, int((time.monotonic() - started) * 1000)),
+                            received_bytes=bytes_read, response_headers_received=True,
+                            response_body_complete=body_complete,
+                            code_position="deepseek._send.http_status",
+                        ))
+                    stage = "read_body"
                     raw = bytearray()
                     async for chunk in response.aiter_bytes():
+                        bytes_read += len(chunk)
                         if len(chunk) > self._max_response_bytes - len(raw):
                             raise ProviderMalformedOutput("Provider response was malformed.")
                         raw.extend(chunk)
@@ -155,12 +246,20 @@ class DeepSeekProvider:
             raise
         except httpx.TimeoutException:
             raise ProviderTimeout("Provider request timed out.") from None
-        except httpx.RequestError:
-            raise ProviderFailure("Provider request failed.") from None
-        return self._parse_response(bytes(raw), request.model)
+        except httpx.RequestError as error:
+            phase = "connect" if isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout)) else stage
+            raise _record_failure(DeepSeekFailureDiagnostic(
+                phase=phase, exception_type=type(error).__name__, http_status=response_status,
+                service_error_code=None, service_error_type=None, status_note=None,
+                elapsed_ms=max(0, int((time.monotonic() - started) * 1000)),
+                received_bytes=bytes_read, response_headers_received=headers_received,
+                response_body_complete=False,
+                code_position=f"deepseek._send.{stage}",
+            )) from None
+        return self._parse_response(bytes(raw), request.model, require_model_match=request.thinking == "enabled")
 
     @staticmethod
-    def _parse_response(raw: bytes, requested_model: str) -> ProviderResponse:
+    def _parse_response(raw: bytes, requested_model: str, *, require_model_match: bool = False) -> ProviderResponse:
         try:
             envelope = json.loads(raw)
             if not isinstance(envelope, dict):
@@ -183,6 +282,8 @@ class DeepSeekProvider:
             completion_tokens = _optional_token_count(usage, "completion_tokens")
             model = envelope.get("model", requested_model)
             if not isinstance(model, str) or not model.strip():
+                raise TypeError
+            if require_model_match and envelope.get("model") != requested_model:
                 raise TypeError
             request_id = envelope.get("id")
             if request_id is not None and (
