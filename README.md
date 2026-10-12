@@ -44,6 +44,12 @@ export CHAT_TO_HOWTO_CONFIG="/absolute/private/data/runtime-config.json"
 
 服务只监听 [http://127.0.0.1:8765](http://127.0.0.1:8765)，单个 FastAPI 进程同时提供生产构建前端和 API。启动脚本默认打开浏览器；使用 `--no-open` 可关闭此行为。
 
+## 截图与笔记正文导入
+
+在网页「聊天内容」展开「截图 OCR / 笔记文字导入」，可上传 PNG/JPG/JPEG 截图或粘贴笔记文字。截图由本机 macOS Vision 识别；先检查并校对正文与类型，再确认保存。识别出的导航、状态栏和底部操作栏文字会丢弃；边界不确定时必须裁剪或手动校对。原始截图保存在本机私有数据目录，删除对应导入批次时一并清理。
+
+之后在「选择截图／笔记与聊天来源」勾选来源、时间未知内容和逐条正文，再输入主题并预览 AI 外发范围。只有勾选的正文会进入本次生成；可与已导入的聊天一起整理。初次安装由 `bootstrap_macos.sh` 编译本机 OCR 工具；已有安装可单独运行 `./scripts/build_ocr_macos.sh`，需要 macOS 命令行开发工具。
+
 ## DeepSeek 配置
 
 运行配置默认选用 `deepseek-v4-flash`，但不会自动寻找、购买或使用任何 API Key。只有进程环境中显式提供 `DEEPSEEK_API_KEY`，并且在 UI 查看完整脱敏外发正文、勾选本次授权后，才会发起网络请求：

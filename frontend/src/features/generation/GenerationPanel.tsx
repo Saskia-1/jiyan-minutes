@@ -33,6 +33,8 @@ interface Props {
   compact?: boolean;
   direction?: SummaryType;
   prepareSelection?: () => Promise<GenerationSelectionRequest>;
+  preparePreview?: () => Promise<GenerationPreview>;
+  scopeRevision?: string;
   editRequested?: boolean;
   onEditRequestedChange?: (value: boolean) => void;
   onComplete?: (jobId: string) => void;
@@ -97,7 +99,7 @@ export function ResultView({ value, verified = true }: { value: Pick<ValidatedGe
     </section>)}
     <details><summary>查看原始依据（{value.evidence.length} 条）</summary>
       <section aria-label="已验证证据" className="validated-evidence"><ol>{value.evidence.map(item => <li key={item.message_id}>
-        <div className="result-meta"><strong>{item.sender_name || item.sender_id || "未知发送者"}</strong>
+        <div className="result-meta"><strong>{item.source_kind === "note_passage" ? "笔记／网页正文" : item.sender_name || item.sender_id || "未知发送者"}</strong>
           <time dateTime={item.timestamp || undefined}>{safeDate(item.timestamp)}</time></div>
         <p>{item.quote}</p>
       </li>)}</ol></section>
@@ -122,6 +124,7 @@ export function GenerationPanel(props: Props) {
     props.sourceId, props.account, props.snapshotId, props.rangeStart, props.rangeEnd,
     props.conversationSelectionIds, props.excludedMessageIds, topicValue.trim(), generationMode,
     props.direction || summaryType, props.includedMessageIds,
+    props.scopeRevision,
   ]);
   const currentScopeKey = useRef(scopeKey);
   const scopeLocked = busy || (!!job && !TERMINAL.has(job.state));
@@ -152,17 +155,17 @@ export function GenerationPanel(props: Props) {
   }
 
   async function quickPreview() {
-    if (!props.prepareSelection || scopeLocked || props.disabled) return;
+    if ((!props.prepareSelection && !props.preparePreview) || scopeLocked || props.disabled) return;
     const requestedScope = scopeKey;
     setBusy(true); setError(""); setPreview(null); setJob(null); setConfirmed(false);
     try {
-      const selection = await props.prepareSelection();
-      if (!alive.current || currentScopeKey.current !== requestedScope) return;
-      const value = await props.api.previewGeneration(selection);
+      const value = props.preparePreview
+        ? await props.preparePreview()
+        : await props.api.previewGeneration(await props.prepareSelection!());
       if (Date.parse(value.expires_at) <= Date.now()) throw new Error("preview_expired");
       if (alive.current && currentScopeKey.current === requestedScope) setPreview(value);
     } catch {
-      if (alive.current) setError("无法建立 AI 外发预览；没有发送聊天内容。请检查聊天范围后重试。");
+      if (alive.current) setError("无法建立 AI 外发预览；没有发送正文。请检查所选范围后重试。");
     } finally { if (alive.current) setBusy(false); }
   }
 
@@ -232,7 +235,7 @@ export function GenerationPanel(props: Props) {
   const outboundPreview = preview && <section className="outbound-preview" aria-label="AI 外发预览">
     <h4>外发与预算确认</h4>
     {preview.synthesis_planned && <p>预算包含一次跨段整合：先核对各段引用，再用本次原消息和中间提炼结果组织完整文档。中间结果在生成后产生，发送范围不会增加。</p>}
-    {preview.cache_hit ? <p>已命中同一 snapshot 与完整 scope 的本地 verified 缓存，本次预计不会外发。</p> : preview.will_send_external ?
+    {preview.cache_hit ? <p>已命中同一冻结范围的本地已验证缓存，本次预计不会外发。</p> : preview.will_send_external ?
       <p>将向 {preview.provider}（{preview.model}；思考模式：{preview.thinking === "enabled" ? `开启，强度 ${preview.reasoning_effort}` : "关闭"}）发送 {preview.message_count} 条纯文本；不发送账号凭据、附件文件或数据库。</p> :
       <p>范围内没有可发送的文本，将在本地返回依据不足。</p>}
     <p>字符数：{preview.character_count} · 最多 {preview.provider_calls} 次调用 · 预计输入不超过 {preview.estimated_input_tokens} token · 总输出上限 {preview.max_output_tokens} token</p>
@@ -252,7 +255,7 @@ export function GenerationPanel(props: Props) {
       onClick={() => void quickPreview()}>{scopeLocked ? "正在整理…" : job?.state === "complete" ? "再次整理" : job?.state === "failed" || error ? "重新整理" : "开始整理"}</button>
       {job && !TERMINAL.has(job.state) && <button type="button" disabled={busy} onClick={() => void cancel()}>取消整理</button>}
     </div>
-    <p className="muted">先预览冻结范围与预算，确认后才会向已配置的 AI 服务发送聊天文本。</p>
+    <p className="muted">先预览冻结范围与预算，确认后才会向已配置的 AI 服务发送所选正文。</p>
     {outboundPreview}
     {job && <><p role="status">生成状态：{STATE_LABELS[job.state]} · 分块 {job.completed_chunks}/{job.total_chunks}{job.cache_hit ? " · 本地缓存命中" : ""}</p>
       <p>AI 用量：{job.usage.request_count} 次请求 · 已知输入 {job.usage.known_prompt_tokens} token · 已知输出 {job.usage.known_completion_tokens} token

@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from chat_to_howto.domain.generation import GenerationResult
+from chat_to_howto.domain.mixed_sources import SourceRef
 from chat_to_howto.services.evidence_validation import ValidatedEvidence
 
 
@@ -32,7 +33,8 @@ class DocumentVersion(_FrozenModel):
 class HowToDocument(_FrozenModel):
     document_id: str
     source_generation_job_id: str
-    source_snapshot_id: str
+    source_snapshot_id: str | None
+    source_refs: tuple[SourceRef, ...] = Field(default=(), exclude_if=lambda value: not value)
     created_at: datetime
     updated_at: datetime
     current_version: DocumentVersion = Field(repr=False)

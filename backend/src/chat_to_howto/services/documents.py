@@ -11,7 +11,7 @@ from chat_to_howto.api.session import digest
 from chat_to_howto.domain.documents import DocumentRecoveryPage, DocumentVersion, HowToDocument
 from chat_to_howto.domain.generation import GenerationResult, summary_groups
 from chat_to_howto.repositories.chat import ChatRepository
-from chat_to_howto.services.evidence_validation import ValidatedGeneration
+from chat_to_howto.services.evidence_validation import ValidatedMixedGeneration, parse_validated_generation
 
 
 _OPAQUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -65,7 +65,7 @@ class DocumentService:
         ):
             raise DocumentConflict("generation job has no verified result")
         try:
-            source = ValidatedGeneration.model_validate_json(str(job["result_json"]))
+            source = parse_validated_generation(str(job["result_json"]))
         except (TypeError, ValueError):
             raise DocumentConflict("verified generation result is invalid") from None
         now = self._now().isoformat()
@@ -182,7 +182,7 @@ class DocumentService:
     @staticmethod
     def _view(row: dict[str, object]) -> HowToDocument:
         try:
-            source = ValidatedGeneration.model_validate_json(
+            source = parse_validated_generation(
                 str(row["source_result_json"])
             )
             versions = tuple(
@@ -215,7 +215,8 @@ class DocumentService:
             return HowToDocument(
                 document_id=str(row["document_id"]),
                 source_generation_job_id=str(row["source_generation_job_id"]),
-                source_snapshot_id=source.snapshot_id,
+                source_snapshot_id=None if isinstance(source, ValidatedMixedGeneration) else source.snapshot_id,
+                source_refs=source.source_refs if isinstance(source, ValidatedMixedGeneration) else (),
                 created_at=datetime.fromisoformat(str(row["created_at_utc"])),
                 updated_at=datetime.fromisoformat(str(row["updated_at_utc"])),
                 current_version=by_id[str(row["current_version_id"])],

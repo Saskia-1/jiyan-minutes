@@ -1372,6 +1372,11 @@ class ChatRepository:
                 """,
                 (cache_key, session_digest),
             ).fetchone()
+            if row is None:
+                row = self._connection.execute(
+                    "SELECT identity_json, result_json FROM chat_generation_cache_v2 WHERE cache_key = ? AND session_digest = ?",
+                    (cache_key, session_digest),
+                ).fetchone()
         return dict(row) if row is not None else None
 
     def create_generation_preview(
@@ -1727,20 +1732,36 @@ class ChatRepository:
         result_json: str,
     ) -> None:
         """Idempotently store a verified derived result for one local session."""
-        self.generation_snapshot_messages(
-            session_digest=session_digest,
-            snapshot_id=snapshot_id,
-        )
+        if snapshot_id.startswith("mixed:v2:"):
+            from chat_to_howto.repositories.content import ContentRepository
+            from chat_to_howto.services.evidence_validation import ValidatedMixedGeneration
+            from chat_to_howto.services.generation_cache import GenerationCacheIdentity
+
+            result = ValidatedMixedGeneration.model_validate_json(result_json)
+            identity = GenerationCacheIdentity.model_validate_json(identity_json)
+            if result.snapshot_id != snapshot_id or result.scope_fingerprint != scope_fingerprint or identity.snapshot_id != snapshot_id or identity.scope_fingerprint != scope_fingerprint:
+                raise ValueError("mixed cache identity mismatch")
+            for ref in result.source_refs:
+                if ref.kind == "chat_snapshot":
+                    self.generation_snapshot_messages(session_digest=session_digest, snapshot_id=ref.id)
+                elif not ContentRepository(self).list_units(ref.id, session_digest=session_digest):
+                    raise PermissionError("mixed cache source is unavailable")
+        else:
+            self.generation_snapshot_messages(
+                session_digest=session_digest,
+                snapshot_id=snapshot_id,
+            )
         expected = (
             snapshot_id,
             scope_fingerprint,
             identity_json,
             result_json,
         )
+        table = "chat_generation_cache_v2" if snapshot_id.startswith("mixed:v2:") else "chat_generation_cache"
         with self._transaction():
             self._connection.execute(
-                """
-                INSERT OR IGNORE INTO chat_generation_cache(
+                f"""
+                INSERT OR IGNORE INTO {table}(
                     cache_key, session_digest, snapshot_id, scope_fingerprint,
                     identity_json, result_json, created_at_utc
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -1756,9 +1777,9 @@ class ChatRepository:
                 ),
             )
             row = self._connection.execute(
-                """
+                f"""
                 SELECT snapshot_id, scope_fingerprint, identity_json, result_json
-                FROM chat_generation_cache
+                FROM {table}
                 WHERE cache_key = ? AND session_digest = ?
                 """,
                 (cache_key, session_digest),
@@ -2142,6 +2163,9 @@ class ChatRepository:
     def _deletion_impact_locked(
         self, *, target_kind: str, target_id: str, session_digest: str
     ) -> dict[str, object]:
+        content_batch_ids: list[str] = []
+        content_unit_ids: list[str] = []
+        private_images: list[dict[str, str]] = []
         if target_kind == "document":
             document = self._connection.execute(
                 "SELECT * FROM chat_documents WHERE document_id = ?", (target_id,)
@@ -2228,7 +2252,9 @@ class ChatRepository:
                     scope = json.loads(str(row["scope_json"]))
                 except (TypeError, ValueError):
                     continue
-                if isinstance(scope, dict) and scope.get("snapshot_id") in snapshot_ids:
+                refs = scope.get("source_refs", []) if isinstance(scope, dict) else []
+                mixed_ref = any(isinstance(ref, dict) and ref.get("kind") == "chat_snapshot" and ref.get("id") in snapshot_ids for ref in refs) if isinstance(refs, list) else False
+                if isinstance(scope, dict) and (scope.get("snapshot_id") in snapshot_ids or mixed_ref):
                     generation_job_ids.append(str(row["job_id"]))
             if generation_job_ids:
                 placeholders = ",".join("?" for _ in generation_job_ids)
@@ -2247,6 +2273,40 @@ class ChatRepository:
                         source_files.append({"root_id": root_id, "parent": "exports", "name": target_id, "kind": "directory"})
                 except (TypeError, ValueError):
                     pass
+        elif target_kind == "content_batch":
+            owned = self._connection.execute(
+                "SELECT 1 FROM content_batches WHERE batch_id = ? AND session_digest = ?",
+                (target_id, session_digest),
+            ).fetchone()
+            if owned is None:
+                raise PermissionError("deletion target is unavailable")
+            content_batch_ids = [target_id]
+            content_unit_ids = [str(row["unit_id"]) for row in self._connection.execute(
+                "SELECT unit_id FROM content_units WHERE batch_id = ? ORDER BY unit_id", (target_id,),
+            ).fetchall()]
+            private_images = [{"root_id": "private-content-images", "parent": ".", "name": str(row["basename"]), "kind": "file"}
+                for row in self._connection.execute("SELECT basename FROM content_images WHERE batch_id = ? ORDER BY image_id", (target_id,)).fetchall()]
+            batch_ids = []; snapshot_ids = []; message_ids = []; shared_message_count = 0
+            manual_import_ids = []; source_files = []
+            generation_job_ids = []
+            for row in self._connection.execute(
+                "SELECT job_id, scope_json FROM chat_generation_jobs WHERE session_digest = ?", (session_digest,),
+            ).fetchall():
+                try:
+                    scope = json.loads(str(row["scope_json"]))
+                except (TypeError, ValueError):
+                    continue
+                refs = scope.get("source_refs", []) if isinstance(scope, dict) else []
+                if isinstance(refs, list) and any(isinstance(ref, dict) and ref.get("kind") == "content_batch" and ref.get("id") == target_id for ref in refs):
+                    generation_job_ids.append(str(row["job_id"]))
+            if generation_job_ids:
+                placeholders = ",".join("?" for _ in generation_job_ids)
+                document_ids = [str(row["document_id"]) for row in self._connection.execute(
+                    f"SELECT document_id FROM chat_documents WHERE source_generation_job_id IN ({placeholders}) ORDER BY document_id",
+                    tuple(generation_job_ids),
+                ).fetchall()]
+            else:
+                document_ids = []
         else:
             raise ValueError("unsupported deletion target")
 
@@ -2293,6 +2353,36 @@ class ChatRepository:
                     f"SELECT preview_id FROM chat_generation_consents WHERE consent_id IN ({placeholders})",
                     tuple(generation_consent_ids),
                 ).fetchall()})
+        if target_kind in {"batch", "content_batch"}:
+            for row in self._connection.execute(
+                "SELECT preview_id, cache_identity_json, scope_json FROM chat_generation_previews WHERE session_digest = ?",
+                (session_digest,),
+            ).fetchall():
+                try:
+                    scope = json.loads(str(row["scope_json"]))
+                    refs = scope.get("source_refs", []) if isinstance(scope, dict) else []
+                    hit = (target_kind == "batch" and (
+                        scope.get("snapshot_id") in snapshot_ids or
+                        any(isinstance(ref, dict) and ref.get("kind") == "chat_snapshot" and ref.get("id") in snapshot_ids for ref in refs)
+                    )) or (target_kind == "content_batch" and any(
+                        isinstance(ref, dict) and ref.get("kind") == "content_batch" and ref.get("id") == target_id for ref in refs
+                    ))
+                    if hit:
+                        generation_preview_ids.append(str(row["preview_id"]))
+                        identity = json.loads(str(row["cache_identity_json"]))
+                        if isinstance(identity, dict) and isinstance(identity.get("cache_key"), str):
+                            cache_keys.append(identity["cache_key"])
+                except (TypeError, ValueError):
+                    continue
+            generation_preview_ids = sorted(set(generation_preview_ids))
+            if generation_preview_ids:
+                placeholders = ",".join("?" for _ in generation_preview_ids)
+                generation_consent_ids = sorted(set(generation_consent_ids) | {
+                    str(row["consent_id"]) for row in self._connection.execute(
+                        f"SELECT consent_id FROM chat_generation_consents WHERE preview_id IN ({placeholders})",
+                        tuple(generation_preview_ids),
+                    ).fetchall()
+                })
         export_job_ids: list[str] = []
         export_consent_ids: list[str] = []
         if batch_ids:
@@ -2319,6 +2409,9 @@ class ChatRepository:
             "export_job_ids": sorted(export_job_ids),
             "export_consent_ids": export_consent_ids,
             "manual_import_ids": manual_import_ids,
+            "content_batch_ids": content_batch_ids,
+            "content_unit_ids": content_unit_ids,
+            "private_images": private_images,
             "managed_files": document_files + source_files,
         }
 
@@ -2354,6 +2447,10 @@ class ChatRepository:
                     f"DELETE FROM chat_generation_cache WHERE session_digest = ? AND cache_key IN ({placeholders})",
                     (session_digest, *impact["cache_keys"]),
                 )
+                self._connection.execute(
+                    f"DELETE FROM chat_generation_cache_v2 WHERE session_digest = ? AND cache_key IN ({placeholders})",
+                    (session_digest, *impact["cache_keys"]),
+                )
             self._delete_ids("chat_export_job_events", "job_id", impact["export_job_ids"])
             self._delete_ids("chat_export_jobs", "job_id", impact["export_job_ids"])
             self._delete_ids("chat_export_consents", "consent_id", impact["export_consent_ids"])
@@ -2375,6 +2472,9 @@ class ChatRepository:
             self._delete_ids("chat_batch_messages", "batch_id", impact["batch_ids"])
             self._delete_ids("chat_batch_conversations", "batch_id", impact["batch_ids"])
             self._delete_ids("chat_export_batches", "batch_id", impact["batch_ids"])
+            self._delete_ids("content_units", "unit_id", impact["content_unit_ids"])
+            self._delete_ids("content_images", "batch_id", impact["content_batch_ids"])
+            self._delete_ids("content_batches", "batch_id", impact["content_batch_ids"])
             if impact["message_ids"]:
                 placeholders = ",".join("?" for _ in impact["message_ids"])
                 self._connection.execute(
@@ -2399,6 +2499,9 @@ class ChatRepository:
                 "snapshots": len(impact["snapshot_ids"]),
                 "messages": len(impact["message_ids"]),
                 "managed_files": len(impact["managed_files"]),
+                "content_batches": len(impact["content_batch_ids"]),
+                "content_units": len(impact["content_unit_ids"]),
+                "content_images": len(impact["private_images"]),
             }}
             self._connection.execute(
                 """
@@ -2421,6 +2524,8 @@ class ChatRepository:
             ("chat_snapshot_messages", "snapshot_id"), ("chat_snapshots", "snapshot_id"),
             ("chat_batch_messages", "batch_id"), ("chat_batch_conversations", "batch_id"),
             ("chat_export_batches", "batch_id"),
+            ("content_units", "unit_id"), ("content_images", "batch_id"),
+            ("content_batches", "batch_id"),
         }
         if (table, column) not in allowed:
             raise ValueError("unsupported deletion table")

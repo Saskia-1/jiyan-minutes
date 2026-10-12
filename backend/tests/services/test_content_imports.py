@@ -50,15 +50,16 @@ def test_preview_filters_chrome_and_commits_only_confirmed_body(service):
         pasted_note=None, session_id="owner",
     )
     assert preview.suggested_kind == "note"
-    assert len(preview.units) == 2
+    assert len(preview.units) == 1
+    assert preview.units[0].text == "一段真实的笔记正文\n另一段正文"
     assert all("关注" not in unit.text and "点赞" not in unit.text for unit in preview.units)
     assert repository.list_batches(session_digest="other") == ()
 
     batch = importer.commit_preview(preview.preview_id, preview.preview_fingerprint, session_id="owner")
-    assert batch.unit_count == 2
+    assert batch.unit_count == 1
     assert batch.image_count == 1
     stored = repository.list_units(batch.batch_id, session_digest=digest("owner"))
-    assert [unit["text"] for unit in stored] == ["一段真实的笔记正文", "另一段正文"]
+    assert [unit["text"] for unit in stored] == ["一段真实的笔记正文\n另一段正文"]
     assert all(unit["sent_at"] is None and unit["sender_name"] is None for unit in stored)
     assert importer.recover_batches(session_id="owner", cursor=None, limit=10).items[0].batch_id == batch.batch_id
     saved = list((root / "private-images").glob("*.png"))

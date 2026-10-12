@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -10,9 +11,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from chat_to_howto.api.session import digest
 from chat_to_howto.domain.generation import GenerationResult, TopicSummary, summary_groups
 from chat_to_howto.domain.messages import StoredMessage
+from chat_to_howto.domain.mixed_sources import SourceRef
 from chat_to_howto.services.generation_merge import MergedGeneration
-from chat_to_howto.services.generation_scope import GenerationScope
+from chat_to_howto.services.generation_scope import AnyGenerationScope, GenerationScope, MixedGenerationScope
 from chat_to_howto.services.generation_redaction import redact_outbound_text
+from chat_to_howto.repositories.content import ContentRepository
 
 
 class EvidenceValidationRejected(ValueError):
@@ -23,11 +26,14 @@ class ValidatedEvidence(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True, hide_input_in_errors=True)
 
     message_id: str
-    conversation_id: str
+    conversation_id: str | None
     timestamp: datetime | None
     sender_id: str | None
     sender_name: str | None
     quote: str = Field(repr=False)
+    source_kind: Literal["chat_message", "note_passage"] | None = Field(default=None, exclude_if=lambda value: value is None)
+    source_batch_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    image_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class ValidatedGeneration(BaseModel):
@@ -42,6 +48,31 @@ class ValidatedGeneration(BaseModel):
     evidence: tuple[ValidatedEvidence, ...] = Field(repr=False)
 
 
+class ValidatedMixedGeneration(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True, hide_input_in_errors=True)
+
+    schema_version: Literal[2] = 2
+    evidence_status: Literal["verified"] = "verified"
+    source_refs: tuple[SourceRef, ...]
+    snapshot_id: str  # Internal v2 cache identity, never a real chat snapshot.
+    scope_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_extraction_ids: tuple[str, ...]
+    result: GenerationResult = Field(repr=False)
+    evidence: tuple[ValidatedEvidence, ...] = Field(repr=False)
+
+
+AnyValidatedGeneration = ValidatedGeneration | ValidatedMixedGeneration
+
+
+def parse_validated_generation(value: str) -> AnyValidatedGeneration:
+    raw = json.loads(value)
+    if not isinstance(raw, dict):
+        raise ValueError("validated generation is invalid")
+    if raw.get("schema_version") == 2:
+        return ValidatedMixedGeneration.model_validate_json(value)
+    return ValidatedGeneration.model_validate_json(value)
+
+
 class _EvidenceRepository(Protocol):
     def generation_snapshot_messages(
         self, *, session_digest: str, snapshot_id: str
@@ -50,16 +81,17 @@ class _EvidenceRepository(Protocol):
 
 
 class EvidenceValidator:
-    def __init__(self, repository: _EvidenceRepository) -> None:
+    def __init__(self, repository: _EvidenceRepository, content_repository: ContentRepository | None = None) -> None:
         self._repository = repository
+        self._content = content_repository
 
     def validate(
         self,
         merged: MergedGeneration,
         *,
-        scope: GenerationScope,
+        scope: AnyGenerationScope,
         session_id: str,
-    ) -> ValidatedGeneration:
+    ) -> AnyValidatedGeneration:
         if not isinstance(session_id, str) or not session_id:
             raise PermissionError("local session is unavailable")
         return self.validate_with_digest(
@@ -72,15 +104,17 @@ class EvidenceValidator:
         self,
         merged: MergedGeneration,
         *,
-        scope: GenerationScope,
+        scope: AnyGenerationScope,
         session_digest: str,
-    ) -> ValidatedGeneration:
+    ) -> AnyValidatedGeneration:
         if (
             not isinstance(session_digest, str)
             or len(session_digest) != 64
             or any(character not in "0123456789abcdef" for character in session_digest)
         ):
             raise PermissionError("local session is unavailable")
+        if isinstance(scope, MixedGenerationScope):
+            return self._validate_mixed(merged, scope=scope, session_digest=session_digest)
         batch_id, snapshot_messages = self._repository.generation_snapshot_messages(
             session_digest=session_digest,
             snapshot_id=scope.snapshot_id,
@@ -165,6 +199,97 @@ class EvidenceValidator:
             source_extraction_ids=merged.source_extraction_ids,
             result=merged.result,
             evidence=tuple(validated),
+        )
+
+    def _validate_mixed(
+        self, merged: MergedGeneration, *, scope: MixedGenerationScope, session_digest: str,
+    ) -> ValidatedMixedGeneration:
+        if self._content is None:
+            raise EvidenceValidationRejected("Mixed evidence source is unavailable.")
+        if merged.result.user_text is not None:
+            raise EvidenceValidationRejected("Generated content cannot claim user authorship.")
+        summary = merged.result.summary
+        if merged.result.status == "complete" and (
+            (scope.summary_type == "how_to" and summary is not None)
+            or (scope.summary_type != "how_to" and (
+                not isinstance(summary, TopicSummary) or summary.summary_type != scope.summary_type
+            ))
+        ):
+            raise EvidenceValidationRejected("Generation direction does not match the frozen scope.")
+
+        original: dict[str, dict[str, object]] = {}
+        for index, ref in enumerate(scope.source_refs):
+            group = f"source-{index + 1}"
+            if ref.kind == "chat_snapshot":
+                batch_id, messages = self._repository.generation_snapshot_messages(
+                    session_digest=session_digest, snapshot_id=ref.id,
+                )
+                entries = ({
+                    "id": message.message_id, "kind": "chat_message", "batch_id": batch_id,
+                    "text": message.text, "timestamp": message.sent_at_utc,
+                    "sender_id": message.sender_id, "sender_name": message.sender_name,
+                    "conversation_id": message.conversation_id, "image_id": None,
+                    "group": group,
+                } for message in messages)
+            else:
+                units = self._content.list_units(ref.id, session_digest=session_digest)
+                if not units:
+                    raise EvidenceValidationRejected("Mixed evidence source is unavailable.")
+                entries = ({
+                    "id": unit["unit_id"], "kind": unit["kind"], "batch_id": ref.id,
+                    "text": unit["text"],
+                    "timestamp": datetime.fromisoformat(unit["sent_at"]) if unit["sent_at"] else None,
+                    "sender_id": None, "sender_name": unit["sender_name"],
+                    "conversation_id": None, "image_id": unit["image_id"],
+                    "group": group,
+                } for unit in units)
+            for entry in entries:
+                identifier = str(entry["id"])
+                if identifier in original:
+                    raise EvidenceValidationRejected("Mixed evidence identity is ambiguous.")
+                original[identifier] = entry
+
+        def allowed(entry: dict[str, object]) -> bool:
+            timestamp = entry["timestamp"]
+            if timestamp is None:
+                return scope.include_undated
+            if not isinstance(timestamp, datetime):
+                return False
+            return scope.start_time is None or scope.start_time <= timestamp < scope.end_time
+
+        scoped = {message.message_id: message for message in scope.messages}
+        if set(scoped) != set(scope.included_unit_ids) - set(scope.excluded_unit_ids):
+            raise EvidenceValidationRejected("Mixed evidence selection changed.")
+        for message in scope.messages:
+            entry = original.get(message.message_id)
+            if (entry is None or not allowed(entry) or entry["kind"] != message.source_kind
+                or entry["group"] != message.source_group or not isinstance(entry["text"], str)
+                or redact_outbound_text(entry["text"], policy_revision=scope.redaction_policy_revision) != message.text):
+                raise EvidenceValidationRejected("Mixed evidence scope content mismatch.")
+
+        references = _referenced_message_ids(merged.result)
+        quote_ids = tuple(quote.message_id for quote in merged.evidence_quotes)
+        if len(set(quote_ids)) != len(quote_ids) or set(quote_ids) != set(references):
+            raise EvidenceValidationRejected("Mixed evidence quote set is invalid.")
+        by_quote = {quote.message_id: quote.quote for quote in merged.evidence_quotes}
+        validated: list[ValidatedEvidence] = []
+        for identifier in references:
+            entry = original.get(identifier)
+            message = scoped.get(identifier)
+            if entry is None or message is None or by_quote[identifier] != message.text:
+                raise EvidenceValidationRejected("Mixed evidence reference or quote is invalid.")
+            validated.append(ValidatedEvidence(
+                message_id=identifier, conversation_id=entry["conversation_id"],
+                timestamp=entry["timestamp"], sender_id=entry["sender_id"],
+                sender_name=entry["sender_name"], quote=entry["text"],
+                source_kind=entry["kind"], source_batch_id=entry["batch_id"],
+                image_id=entry["image_id"],
+            ))
+        return ValidatedMixedGeneration(
+            source_refs=scope.source_refs, snapshot_id=scope.snapshot_id,
+            scope_fingerprint=scope.fingerprint(),
+            source_extraction_ids=merged.source_extraction_ids,
+            result=merged.result, evidence=tuple(validated),
         )
 
 

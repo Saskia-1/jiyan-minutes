@@ -25,6 +25,7 @@ from chat_to_howto.api.export_jobs import (
 )
 from chat_to_howto.api.generation import (
     SelectionGenerationRequest,
+    MixedGenerationRequest,
     create_generation_router,
 )
 from chat_to_howto.api.imports import create_imports_router
@@ -61,6 +62,7 @@ from chat_to_howto.services.generation_jobs import (
 )
 from chat_to_howto.services.generation_planning import (
     GenerationSelection,
+    MixedGenerationSelection,
 )
 from chat_to_howto.services.generation_prompts import PROMPT_VERSION
 from chat_to_howto.services.p0_verifier import P0Verifier
@@ -274,6 +276,7 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
         cache_settings=generation_cache_settings,
         clock=clock,
         max_daily_provider_requests=settings.llm_daily_request_limit,
+        mixed_search=mixed_search,
     )
     topic_expansion_service = TopicExpansionService(
         provider_factory=selected_generation_provider_factory,
@@ -289,7 +292,8 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
         clock=clock,
     )
     deletion_service = DeletionService(
-        repository=chat_repository, approved_roots=approved_p1_roots, clock=clock
+        repository=chat_repository, approved_roots=approved_p1_roots, clock=clock,
+        private_image_root=database.path.with_name(f"{database.path.stem}.content-images"),
     )
     deletion_service.reconcile_cleanup()
     app.state.chat_repository = chat_repository
@@ -862,6 +866,27 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
             ),
         )
 
+    def resolve_mixed_generation_selection(
+        request: MixedGenerationRequest, session_id: str,
+    ) -> MixedGenerationSelection:
+        if not session_id or settings.llm_provider == "unconfigured":
+            raise GenerationAuthorizationError("generation provider is unavailable")
+        return MixedGenerationSelection(
+            source_refs=request.source_refs, included_unit_ids=request.included_unit_ids,
+            excluded_unit_ids=request.excluded_unit_ids, topic=request.topic,
+            mode=request.mode, summary_type=request.summary_type,
+            include_undated=request.include_undated, start_time=request.start_time,
+            end_time=request.end_time, provider=settings.llm_provider,
+            model=settings.llm_model, thinking=settings.llm_thinking,
+            reasoning_effort=settings.llm_reasoning_effort,
+            redaction_policy_revision="text-only-outbound-v1",
+            budget=GenerationBudget(
+                max_messages=2_000, max_input_tokens=100_000,
+                max_provider_calls=20,
+                max_output_tokens=settings.llm_max_output_tokens,
+            ),
+        )
+
     app.include_router(
         create_imports_router(
             get_service=lambda: chat_imports,
@@ -912,6 +937,7 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
             require_session=require_p1_session,
             require_csrf=require_p1_csrf,
             resolve_selection=resolve_generation_selection,
+            resolve_mixed_selection=resolve_mixed_generation_selection,
         )
     )
     app.include_router(

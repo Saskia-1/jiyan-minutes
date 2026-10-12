@@ -608,7 +608,8 @@ it.each([false, true])("文档恢复客户端列出最新版本，包括证据�
 it("断开来源与删除数据都要明确确认，并严格解析影响清单", async () => {
   const requests: Request[] = [];
   const countKeys = ["documents", "versions", "document_artifacts", "generation_jobs", "generation_requests", "generation_consents",
-    "generation_previews", "cache_entries", "export_batches", "export_jobs", "export_consents", "snapshots", "messages", "managed_files"];
+    "generation_previews", "cache_entries", "export_batches", "export_jobs", "export_consents", "snapshots", "messages", "managed_files",
+    "content_batches", "content_units", "content_images"];
   const counts = Object.fromEntries(countKeys.map(key => [key, key === "documents" ? 1 : 0]));
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = asRequest(input, init); requests.push(request.clone());

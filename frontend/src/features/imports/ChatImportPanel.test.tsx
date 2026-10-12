@@ -54,6 +54,7 @@ it("混合检索只发送明确勾选的来源，时间未知内容需单独选�
     searchMixed: vi.fn().mockResolvedValue({ hits: [{ unit_id: "content:v1:note:" + "a".repeat(64), source_kind: "note_passage",
       source_ref: { kind: "content_batch", id: contentBatch.batch_id }, text: "音乐笔记", sender_name: null,
       timestamp: null, source_order: 0, image_id: null }] }),
+    previewMixedGeneration: vi.fn().mockRejectedValue(new Error("stop before provider")),
   } as unknown as LocalApiClient;
   const { ChatImportPanel } = await import("./ChatImportPanel");
   const user = userEvent.setup();
@@ -67,8 +68,45 @@ it("混合检索只发送明确勾选的来源，时间未知内容需单独选�
   await waitFor(() => expect(api.searchMixed).toHaveBeenCalledWith({
     source_refs: [{ kind: "content_batch", id: contentBatch.batch_id }], include_undated: true, terms: ["音乐"],
   }));
-  await user.click(screen.getByText("相关正文 1 条"));
+  expect(screen.getByText(/相关正文 1 条 · 已选择 0 条/)).toBeVisible();
   expect(await screen.findByText("音乐笔记")).toBeVisible();
+  expect(screen.getByRole("button", { name: "开始整理" })).toBeDisabled();
+  await user.click(screen.getByRole("checkbox", { name: "纳入整理" }));
+  await user.click(screen.getByRole("button", { name: "开始整理" }));
+  await waitFor(() => expect(api.previewMixedGeneration).toHaveBeenCalledWith(expect.objectContaining({
+    source_refs: [{ kind: "content_batch", id: contentBatch.batch_id }],
+    included_unit_ids: ["content:v1:note:" + "a".repeat(64)], excluded_unit_ids: [],
+    include_undated: true, summary_type: "ideas",
+  })));
+});
+
+it("只有笔记正文、尚未导入聊天时也可逐项选择并进入生成预览", async () => {
+  const batch = { batch_id: "n".repeat(32), unit_count: 1, image_count: 0,
+    images: [], created_at_utc: "2026-10-12T00:00:00Z" };
+  const unitId = "content:v1:note:" + "d".repeat(64);
+  const api = {
+    recoverImports: vi.fn().mockResolvedValue(emptyRecovery),
+    recoverContentBatches: vi.fn().mockResolvedValue({ items: [batch], next_cursor: null }),
+    searchMixed: vi.fn().mockResolvedValue({ hits: [{ unit_id: unitId, source_kind: "note_passage",
+      source_ref: { kind: "content_batch", id: batch.batch_id }, text: "合成主题正文", sender_name: null,
+      timestamp: null, source_order: 0, image_id: null }] }),
+    previewMixedGeneration: vi.fn().mockRejectedValue(new Error("stop before provider")),
+  } as unknown as LocalApiClient;
+  const { ChatImportPanel } = await import("./ChatImportPanel");
+  const user = userEvent.setup();
+  render(<ChatImportPanel compact api={api} outputRootId="fixture-root" />);
+  await user.type(screen.getByRole("textbox", { name: "关键词" }), "合成主题");
+  await user.click(screen.getByText("选择截图／笔记与聊天来源，预览混合检索"));
+  await user.click(await screen.findByRole("checkbox", { name: /截图／笔记批次 1/ }));
+  await user.click(screen.getByRole("checkbox", { name: "包含时间未知的聊天与笔记" }));
+  await user.click(screen.getByRole("button", { name: "预览勾选来源的相关正文" }));
+  await user.click(await screen.findByRole("checkbox", { name: "纳入整理" }));
+  expect(screen.getByRole("button", { name: "开始整理" })).toBeEnabled();
+  await user.click(screen.getByRole("button", { name: "开始整理" }));
+  await waitFor(() => expect(api.previewMixedGeneration).toHaveBeenCalledWith(expect.objectContaining({
+    source_refs: [{ kind: "content_batch", id: batch.batch_id }], included_unit_ids: [unitId],
+    excluded_unit_ids: [], summary_type: "ideas", include_undated: true,
+  })));
 });
 
 it("简洁导入无时间聊天默认折叠，展开排除后只整理剩余消息", async () => {

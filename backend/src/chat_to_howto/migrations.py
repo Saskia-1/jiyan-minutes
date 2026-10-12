@@ -1311,6 +1311,48 @@ _MIGRATION_12 = (
 )
 
 
+_MIGRATION_13 = (
+    """
+    CREATE TABLE chat_generation_cache_v2 (
+        cache_key TEXT NOT NULL CHECK (length(cache_key) = 64 AND cache_key NOT GLOB '*[^0-9a-f]*'),
+        session_digest TEXT NOT NULL CHECK (length(session_digest) = 64 AND session_digest NOT GLOB '*[^0-9a-f]*'),
+        snapshot_id TEXT NOT NULL CHECK (snapshot_id GLOB 'mixed:v2:*'),
+        scope_fingerprint TEXT NOT NULL CHECK (length(scope_fingerprint) = 64 AND scope_fingerprint NOT GLOB '*[^0-9a-f]*'),
+        identity_json TEXT NOT NULL,
+        result_json TEXT NOT NULL,
+        created_at_utc TEXT NOT NULL,
+        PRIMARY KEY (cache_key, session_digest)
+    )
+    """,
+    "CREATE INDEX idx_chat_generation_cache_v2_scope ON chat_generation_cache_v2(scope_fingerprint, session_digest)",
+)
+
+
+_MIGRATION_14 = (
+    "ALTER TABLE chat_deletion_plans RENAME TO chat_deletion_plans_old",
+    """
+    CREATE TABLE chat_deletion_plans (
+        plan_id TEXT PRIMARY KEY,
+        session_digest TEXT NOT NULL CHECK (length(session_digest) = 64 AND session_digest NOT GLOB '*[^0-9a-f]*'),
+        target_kind TEXT NOT NULL CHECK (target_kind IN ('document', 'batch', 'content_batch')),
+        target_id TEXT NOT NULL,
+        include_managed_files INTEGER NOT NULL CHECK (include_managed_files IN (0, 1)),
+        impact_json TEXT NOT NULL,
+        fingerprint TEXT NOT NULL CHECK (length(fingerprint) = 64 AND fingerprint NOT GLOB '*[^0-9a-f]*'),
+        created_at_utc TEXT NOT NULL,
+        expires_at_utc TEXT NOT NULL,
+        confirmed_at_utc TEXT,
+        state TEXT NOT NULL CHECK (state IN ('planned', 'cleanup_pending', 'complete', 'failed')),
+        staged_files_json TEXT,
+        result_json TEXT
+    )
+    """,
+    "INSERT INTO chat_deletion_plans SELECT * FROM chat_deletion_plans_old",
+    "DROP TABLE chat_deletion_plans_old",
+    "CREATE INDEX idx_chat_deletion_plans_session ON chat_deletion_plans(session_digest, expires_at_utc)",
+)
+
+
 MigrationAction = tuple[str, ...] | Callable[[sqlite3.Connection], None]
 MIGRATIONS: tuple[tuple[int, MigrationAction], ...] = (
     (1, _MIGRATION_1),
@@ -1325,6 +1367,8 @@ MIGRATIONS: tuple[tuple[int, MigrationAction], ...] = (
     (10, _MIGRATION_10),
     (11, _MIGRATION_11),
     (12, _MIGRATION_12),
+    (13, _MIGRATION_13),
+    (14, _MIGRATION_14),
 )
 
 

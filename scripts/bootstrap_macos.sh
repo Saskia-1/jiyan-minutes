@@ -22,6 +22,7 @@ done
 command -v python3 >/dev/null 2>&1 || { echo "需要 Python 3.11 或更高版本。" >&2; exit 1; }
 command -v node >/dev/null 2>&1 || { echo "需要 Node.js 24。" >&2; exit 1; }
 command -v corepack >/dev/null 2>&1 || { echo "需要随 Node.js 提供的 corepack。" >&2; exit 1; }
+command -v xcrun >/dev/null 2>&1 && xcrun --find clang >/dev/null 2>&1 || { echo "截图 OCR 需要 macOS 命令行开发工具（clang）。" >&2; exit 1; }
 
 python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' || { echo "Python 版本必须至少为 3.11。" >&2; exit 1; }
 node -e 'const m=Number(process.versions.node.split(".")[0]); process.exit(m === 24 ? 0 : 1)' || { echo "Node.js 必须是 24.x。" >&2; exit 1; }
@@ -38,6 +39,7 @@ fi
 python3 -m venv "$PROJECT_ROOT/backend/.venv"
 "$PROJECT_ROOT/backend/.venv/bin/python" -m pip install --requirement "$PROJECT_ROOT/backend/requirements.lock"
 (cd "$PROJECT_ROOT/frontend" && corepack pnpm install --frozen-lockfile && corepack pnpm run build)
+"$SCRIPT_DIR/build_ocr_macos.sh"
 
 CONFIG_PATH="$DATA_DIR/runtime-config.json"
 if [ ! -e "$CONFIG_PATH" ]; then

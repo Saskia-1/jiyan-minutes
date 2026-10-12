@@ -17,7 +17,7 @@ _OPAQUE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
 
 class CreateDeletionPlanRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True, hide_input_in_errors=True)
-    target_kind: Literal["document", "batch"]
+    target_kind: Literal["document", "batch", "content_batch"]
     target_id: str = Field(min_length=1, max_length=128, pattern=_OPAQUE_PATTERN)
     include_managed_files: bool
 

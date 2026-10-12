@@ -11,6 +11,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from chat_to_howto.domain.generation import GenerationBudget, OutboundMessage, SummaryType
+from chat_to_howto.domain.mixed_sources import SourceRef
 
 
 class GenerationScope(BaseModel):
@@ -129,6 +130,81 @@ class GenerationScope(BaseModel):
         return sha256(payload).hexdigest()
 
 
+class MixedGenerationScope(BaseModel):
+    """Version 2 frozen scope; v1 JSON and real snapshot semantics remain unchanged."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True, hide_input_in_errors=True)
+
+    schema_version: Literal[2] = 2
+    source_refs: tuple[SourceRef, ...]
+    included_unit_ids: tuple[str, ...]
+    excluded_unit_ids: tuple[str, ...]
+    mode: Literal["fast", "complete"]
+    generation_kind: Literal["guide", "summary"]
+    summary_type: SummaryType
+    topic: str = Field(repr=False)
+    provider: str
+    model: str
+    thinking: Literal["disabled", "enabled"]
+    reasoning_effort: Literal["low", "high", "max"] | None
+    redaction_policy_revision: str
+    include_undated: bool
+    start_time: datetime | None
+    end_time: datetime | None
+    messages: tuple[OutboundMessage, ...] = Field(repr=False)
+    budget: GenerationBudget
+
+    @model_validator(mode="after")
+    def validate_frozen_selection(self) -> "MixedGenerationScope":
+        if not self.source_refs or len(set((source.kind, source.id) for source in self.source_refs)) != len(self.source_refs):
+            raise ValueError("mixed sources must be distinct")
+        included = set(self.included_unit_ids)
+        excluded = set(self.excluded_unit_ids)
+        sent = {message.message_id for message in self.messages}
+        if not included or len(included) != len(self.included_unit_ids) or len(excluded) != len(self.excluded_unit_ids):
+            raise ValueError("mixed unit IDs must be unique")
+        if not excluded <= included or sent != included - excluded or len(sent) != len(self.messages):
+            raise ValueError("mixed outbound messages do not match the selection")
+        if any(message.source_kind is None for message in self.messages):
+            raise ValueError("mixed messages require a source kind")
+        if (self.thinking == "enabled") != (self.reasoning_effort is not None):
+            raise ValueError("thinking mode and reasoning effort must be paired")
+        if (self.start_time is None) != (self.end_time is None) or (self.start_time is not None and self.start_time >= self.end_time):
+            raise ValueError("mixed time range is invalid")
+        if len(self.messages) > self.budget.max_messages or ceil((len(self.topic) + sum(len(message.text) for message in self.messages)) / 1.5) > self.budget.max_input_tokens:
+            raise ValueError("mixed outbound budget exceeded")
+        return self
+
+    @property
+    def snapshot_id(self) -> str:
+        """A cache/job identity, never an actual chat snapshot."""
+        return f"mixed:v2:{self.fingerprint()}"
+
+    @property
+    def batch_id(self) -> str:
+        return self.snapshot_id
+
+    @property
+    def excluded_message_ids(self) -> tuple[str, ...]:
+        return self.excluded_unit_ids
+
+    def provider_payload(self) -> bytes:
+        return json.dumps({
+            "schema_version": 2, "mode": self.mode, "topic": self.topic,
+            "generation_kind": self.generation_kind, "summary_type": self.summary_type,
+            "messages": [message.model_dump(mode="json") for message in self.messages],
+        }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    def payload_sha256(self) -> str:
+        return sha256(self.provider_payload()).hexdigest()
+
+    def fingerprint(self) -> str:
+        return sha256(json.dumps(self.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+AnyGenerationScope = GenerationScope | MixedGenerationScope
+
+
 class OutboundPreview(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True, hide_input_in_errors=True)
 
@@ -143,7 +219,7 @@ class OutboundPreview(BaseModel):
     estimated_cost: None = None
 
 
-def build_outbound_preview(scope: GenerationScope) -> OutboundPreview:
+def build_outbound_preview(scope: AnyGenerationScope) -> OutboundPreview:
     payload = scope.provider_payload()
     character_count = sum(len(message.text) for message in scope.messages)
     # This range is explicitly an estimate, not a tokenizer or price quote.
@@ -191,7 +267,7 @@ class OutboundConsent(BaseModel):
     @classmethod
     def grant(
         cls,
-        scope: GenerationScope,
+        scope: AnyGenerationScope,
         *,
         recorded_at: datetime,
         expires_at: datetime,
@@ -203,7 +279,7 @@ class OutboundConsent(BaseModel):
             expires_at=expires_at,
         )
 
-    def matches(self, scope: GenerationScope, *, now: datetime) -> bool:
+    def matches(self, scope: AnyGenerationScope, *, now: datetime) -> bool:
         instant = now.astimezone(timezone.utc) if now.tzinfo and now.utcoffset() is not None else None
         return bool(
             instant is not None
@@ -213,7 +289,7 @@ class OutboundConsent(BaseModel):
             and self.payload_sha256 == scope.payload_sha256()
         )
 
-    def consume(self, scope: GenerationScope, *, now: datetime) -> "OutboundConsent":
+    def consume(self, scope: AnyGenerationScope, *, now: datetime) -> "OutboundConsent":
         if not self.matches(scope, now=now):
             raise PermissionError("outbound consent is stale, expired, or already consumed")
         return self.model_copy(update={"consumed_at": now.astimezone(timezone.utc)})

@@ -9,7 +9,7 @@ import {
   type ImportCommit, type ImportPreview, type ImportPreviewRequest, type ImportRecoveryPage,
   type ContentBatch, type ContentBatchPage, type ContentPreview, type ContentPreviewRequest,
   type ContentUnitEdit,
-  type MixedSearchPage, type MixedSearchRequest,
+  type MixedSearchPage, type MixedSearchRequest, type MixedGenerationRequest, type SourceRef,
 } from "../types";
 
 export class ApiError extends Error {
@@ -388,17 +388,16 @@ function parseChatSummary(value: unknown): NonNullable<HowToResult["summary"]> {
 }
 function parseValidatedGeneration(value: unknown): ValidatedGeneration {
   if (!isObject(value) || !Array.isArray(value.source_extraction_ids) || !Array.isArray(value.evidence)) return invalid();
-  exactPublicFields(value, ["evidence_status", "batch_id", "snapshot_id", "scope_fingerprint", "source_extraction_ids", "result", "evidence"]);
+  const mixed = value.schema_version === 2;
+  exactPublicFields(value, mixed
+    ? ["schema_version", "evidence_status", "source_refs", "snapshot_id", "scope_fingerprint", "source_extraction_ids", "result", "evidence"]
+    : ["evidence_status", "batch_id", "snapshot_id", "scope_fingerprint", "source_extraction_ids", "result", "evidence"]);
   if (value.evidence_status !== "verified") return invalid();
-  const evidence = value.evidence.map(item => {
-    if (!isObject(item)) return invalid();
-    exactPublicFields(item, ["message_id", "conversation_id", "timestamp", "sender_id", "sender_name", "quote"]);
-    return { message_id: requiredString(item.message_id), conversation_id: requiredString(item.conversation_id),
-      timestamp: item.timestamp === null ? null : expiresAt(item.timestamp), sender_id: nullableString(item.sender_id), sender_name: nullableString(item.sender_name),
-      quote: requiredString(item.quote) };
-  });
+  const evidence = value.evidence.map(parseEvidence);
   if (isObject(value.result) && Object.hasOwn(value.result, "user_text")) return invalid();
-  return { evidence_status: "verified", batch_id: requiredString(value.batch_id), snapshot_id: requiredString(value.snapshot_id),
+  return { evidence_status: "verified", ...(mixed
+    ? { schema_version: 2 as const, source_refs: parseSourceRefs(value.source_refs) }
+    : { batch_id: requiredString(value.batch_id) }), snapshot_id: requiredString(value.snapshot_id),
     scope_fingerprint: disclosureHash(value.scope_fingerprint), source_extraction_ids: parseStringList(value.source_extraction_ids, true),
     result: parseHowTo(value.result), evidence };
 }
@@ -435,10 +434,23 @@ function parseGenerationJob(value: unknown): GenerationJob {
 }
 function parseEvidence(value: unknown): ValidatedEvidence {
   if (!isObject(value)) return invalid();
-  exactPublicFields(value, ["message_id", "conversation_id", "timestamp", "sender_id", "sender_name", "quote"]);
-  return { message_id: requiredString(value.message_id), conversation_id: requiredString(value.conversation_id),
+  const mixed = Object.hasOwn(value, "source_kind");
+  exactPublicFields(value, ["message_id", "conversation_id", "timestamp", "sender_id", "sender_name", "quote",
+    ...(mixed ? ["source_kind", "source_batch_id"] : []), ...(Object.hasOwn(value, "image_id") ? ["image_id"] : [])]);
+  if (!mixed && Object.hasOwn(value, "image_id")) return invalid();
+  return { message_id: requiredString(value.message_id), conversation_id: mixed ? nullableString(value.conversation_id) : requiredString(value.conversation_id),
     timestamp: value.timestamp === null ? null : expiresAt(value.timestamp), sender_id: nullableString(value.sender_id), sender_name: nullableString(value.sender_name),
-    quote: requiredString(value.quote) };
+    quote: requiredString(value.quote), ...(mixed ? { source_kind: member(["chat_message", "note_passage"] as const, value.source_kind),
+      source_batch_id: requiredString(value.source_batch_id), ...(Object.hasOwn(value, "image_id") ? { image_id: requiredString(value.image_id) } : {}) } : {}) };
+}
+function parseSourceRefs(value: unknown): SourceRef[] {
+  if (!Array.isArray(value) || !value.length || value.length > 50) return invalid();
+  const refs = value.map(item => {
+    if (!isObject(item)) return invalid();
+    exactPublicFields(item, ["kind", "id"]);
+    return { kind: member(["chat_snapshot", "content_batch"] as const, item.kind), id: requiredString(item.id) };
+  });
+  return new Set(refs.map(item => `${item.kind}:${item.id}`)).size === refs.length ? refs : invalid();
 }
 function parseDocumentVersion(value: unknown): DocumentVersion {
   if (!isObject(value)) return invalid();
@@ -457,12 +469,13 @@ function parseDocumentVersion(value: unknown): DocumentVersion {
 function parseDocument(value: unknown): HowToDocument {
   if (!isObject(value) || !Array.isArray(value.versions) || !Array.isArray(value.source_evidence)) return invalid();
   exactPublicFields(value, ["document_id", "source_generation_job_id", "source_snapshot_id", "created_at", "updated_at",
-    "current_version", "versions", "source_evidence"]);
+    "current_version", "versions", "source_evidence", ...(Object.hasOwn(value, "source_refs") ? ["source_refs"] : [])]);
   const document_id = requiredString(value.document_id); const source_generation_job_id = requiredString(value.source_generation_job_id);
   const versions = value.versions.map(parseDocumentVersion); const current_version = parseDocumentVersion(value.current_version);
   if (!versions.length || versions.some(item => item.document_id !== document_id || item.source_generation_job_id !== source_generation_job_id) ||
       !versions.some(item => item.version_id === current_version.version_id)) return invalid();
-  return { document_id, source_generation_job_id, source_snapshot_id: requiredString(value.source_snapshot_id),
+  return { document_id, source_generation_job_id, source_snapshot_id: value.source_snapshot_id === null ? null : requiredString(value.source_snapshot_id),
+    ...(Object.hasOwn(value, "source_refs") ? { source_refs: parseSourceRefs(value.source_refs) } : {}),
     created_at: expiresAt(value.created_at), updated_at: expiresAt(value.updated_at), current_version, versions,
     source_evidence: value.source_evidence.map(parseEvidence) };
 }
@@ -493,7 +506,7 @@ function parseDeletionCounts(value: unknown): Record<DeletionCountKey, number> {
 function parseDeletionPlan(value: unknown): DeletionPlan {
   if (!isObject(value) || !Array.isArray(value.effects) || typeof value.include_managed_files !== "boolean") return invalid();
   exactPublicFields(value, ["plan_id", "target_kind", "target_id", "include_managed_files", "fingerprint", "counts", "effects", "expires_at"]);
-  return { plan_id: requiredString(value.plan_id), target_kind: member(["document", "batch"] as const, value.target_kind),
+  return { plan_id: requiredString(value.plan_id), target_kind: member(["document", "batch", "content_batch"] as const, value.target_kind),
     target_id: requiredString(value.target_id), include_managed_files: value.include_managed_files,
     fingerprint: disclosureHash(value.fingerprint), counts: parseDeletionCounts(value.counts),
     effects: value.effects.map(requiredString), expires_at: expiresAt(value.expires_at) };
@@ -897,6 +910,13 @@ export function createClient() {
       if (!valid) return Promise.reject(new ApiError(0));
       return request("/api/generation/previews/from-selections", parseGenerationPreview, selection);
     },
+    previewMixedGeneration: (selection: MixedGenerationRequest) => {
+      const ids = selection.included_unit_ids;
+      if (!selection.source_refs.length || !ids.length || ids.length > 2_000 ||
+          new Set(ids).size !== ids.length || !selection.excluded_unit_ids.every(id => ids.includes(id)) ||
+          !selection.topic.trim() || selection.topic.length > 512) return Promise.reject(new ApiError(0));
+      return request("/api/generation/mixed/previews", parseGenerationPreview, selection);
+    },
     authorizeGeneration: (preview_id: string) => {
       if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(preview_id)) return Promise.reject(new ApiError(0));
       return request("/api/generation/consents", parseGenerationConsent, { preview_id, confirmed: true });
@@ -957,8 +977,8 @@ export function createClient() {
       if (!response.ok) throw new ApiError(response.status);
       return response.blob();
     },
-    prepareDeletion: (target_kind: "document" | "batch", target_id: string, include_managed_files: boolean) => {
-      if (!["document", "batch"].includes(target_kind) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(target_id))
+    prepareDeletion: (target_kind: "document" | "batch" | "content_batch", target_id: string, include_managed_files: boolean) => {
+      if (!["document", "batch", "content_batch"].includes(target_kind) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(target_id))
         return Promise.reject(new ApiError(0));
       return request("/api/deletion-plans", parseDeletionPlan, { target_kind, target_id, include_managed_files });
     },

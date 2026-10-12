@@ -166,6 +166,8 @@ class OutboundMessage(_FrozenModel):
     text: str = Field(min_length=1, repr=False)
     speaker: str | None = Field(default=None, exclude_if=lambda value: value is None)
     conversation: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    source_kind: Literal["chat_message", "note_passage"] | None = Field(default=None, exclude_if=lambda value: value is None)
+    source_group: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @field_validator("message_id", "text")
     @classmethod

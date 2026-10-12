@@ -13,8 +13,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from chat_to_howto.api.session import digest
 from chat_to_howto.domain.generation import GenerationBudget, GenerationResult, OutboundMessage, SummaryType
 from chat_to_howto.domain.messages import StoredMessage
-from chat_to_howto.services.generation_scope import GenerationScope
+from chat_to_howto.domain.mixed_sources import MixedSearchRequest, SourceRef
+from chat_to_howto.services.generation_scope import AnyGenerationScope, GenerationScope, MixedGenerationScope
 from chat_to_howto.services.generation_redaction import redact_outbound_text
+from chat_to_howto.services.mixed_search import MixedSearchService
 from chat_to_howto.services.generation_references import (
     EvidenceReferenceMap,
     generation_reference_ids,
@@ -123,6 +125,8 @@ class GenerationScopeBuilder:
             session_digest=digest(session_id),
             snapshot_id=selection.snapshot_id,
         )
+
+
         conversations = set(selection.conversation_ids)
         scoped = tuple(
             message
@@ -231,6 +235,87 @@ class GenerationScopeBuilder:
         )
 
 
+class MixedGenerationSelection(BaseModel):
+    """An explicit, bounded user selection resolved through local source ownership."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True, hide_input_in_errors=True)
+
+    source_refs: tuple[SourceRef, ...] = Field(min_length=1, max_length=50)
+    included_unit_ids: tuple[str, ...] = Field(min_length=1, max_length=2_000)
+    excluded_unit_ids: tuple[str, ...] = Field(default=(), max_length=2_000)
+    topic: str = Field(min_length=1, max_length=512, repr=False)
+    mode: Literal["fast", "complete"]
+    summary_type: SummaryType
+    include_undated: bool
+    start_time: datetime | None
+    end_time: datetime | None
+    provider: str
+    model: str
+    thinking: Literal["disabled", "enabled"]
+    reasoning_effort: Literal["low", "high", "max"] | None
+    redaction_policy_revision: str
+    budget: GenerationBudget
+
+    @field_validator("source_refs", "included_unit_ids", "excluded_unit_ids", mode="before")
+    @classmethod
+    def _parse_sequences(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def _validate_selection(self) -> "MixedGenerationSelection":
+        if not self.topic.strip() or len(set(self.included_unit_ids)) != len(self.included_unit_ids):
+            raise ValueError("mixed selection is invalid")
+        if len(set(self.excluded_unit_ids)) != len(self.excluded_unit_ids):
+            raise ValueError("mixed exclusions must be unique")
+        if not set(self.excluded_unit_ids) <= set(self.included_unit_ids):
+            raise ValueError("mixed exclusions must be selected")
+        if (self.thinking == "enabled") != (self.reasoning_effort is not None):
+            raise ValueError("thinking mode and effort must be paired")
+        return self
+
+
+class MixedGenerationScopeBuilder:
+    def __init__(self, search: MixedSearchService) -> None:
+        self._search = search
+
+    def build(self, selection: MixedGenerationSelection, *, session_id: str) -> MixedGenerationScope:
+        hits = self._search.search(MixedSearchRequest(
+            source_refs=selection.source_refs, include_undated=selection.include_undated,
+            start_time=selection.start_time, end_time=selection.end_time, terms=("",),
+        ), session_id=session_id)
+        by_id = {hit.unit_id: hit for hit in hits}
+        selected = set(selection.included_unit_ids)
+        if not selected <= by_id.keys():
+            raise ValueError("mixed selection includes unavailable or out-of-range units")
+        excluded = set(selection.excluded_unit_ids)
+        included = tuple(hit for hit in hits if hit.unit_id in selected - excluded)
+        speaker_keys = tuple(dict.fromkeys(
+            (hit.source_ref.kind, hit.source_ref.id, hit.sender_name)
+            for hit in included if hit.source_kind == "chat_message" and hit.sender_name
+        ))
+        speakers = {key: f"speaker-{index + 1}" for index, key in enumerate(speaker_keys)}
+        groups = {key: f"source-{index + 1}" for index, key in enumerate(
+            dict.fromkeys((ref.kind, ref.id) for ref in selection.source_refs)
+        )}
+        messages = tuple(OutboundMessage(
+            message_id=hit.unit_id,
+            text=redact_outbound_text(hit.text, policy_revision=selection.redaction_policy_revision),
+            speaker=speakers.get((hit.source_ref.kind, hit.source_ref.id, hit.sender_name)),
+            source_kind=hit.source_kind,
+            source_group=groups[(hit.source_ref.kind, hit.source_ref.id)],
+        ) for hit in included)
+        return MixedGenerationScope(
+            source_refs=selection.source_refs, included_unit_ids=selection.included_unit_ids,
+            excluded_unit_ids=selection.excluded_unit_ids, mode=selection.mode,
+            generation_kind="summary", summary_type=selection.summary_type,
+            topic=selection.topic, provider=selection.provider, model=selection.model,
+            thinking=selection.thinking, reasoning_effort=selection.reasoning_effort,
+            redaction_policy_revision=selection.redaction_policy_revision,
+            include_undated=selection.include_undated, start_time=selection.start_time,
+            end_time=selection.end_time, messages=messages, budget=selection.budget,
+        )
+
+
 def message_order(message: StoredMessage):
     return (message.sent_at_utc or datetime.max.replace(tzinfo=timezone.utc),
             message.source_order is None, message.source_order or 0, message.message_id)
@@ -330,7 +415,7 @@ def estimate_chunk_tokens(topic: str, messages: tuple[OutboundMessage, ...], gen
 
 
 def _synthesis_payload(
-    scope: GenerationScope,
+    scope: AnyGenerationScope,
     *,
     drafts: tuple[dict[str, object], ...],
     messages: tuple[OutboundMessage, ...],
@@ -347,6 +432,10 @@ def _synthesis_payload(
             item["speaker"] = message.speaker
         if message.conversation is not None:
             item["conversation"] = message.conversation
+        if message.source_kind is not None:
+            item["source_kind"] = message.source_kind
+        if message.source_group is not None:
+            item["source_group"] = message.source_group
         evidence_context.append(item)
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -377,7 +466,7 @@ def _synthesis_payload(
 
 
 def build_generation_plan(
-    scope: GenerationScope,
+    scope: AnyGenerationScope,
     *,
     max_chunk_input_tokens: int,
 ) -> GenerationPlan:
@@ -499,7 +588,7 @@ def build_generation_plan(
     )
 
 
-def build_synthesis_chunk(scope: GenerationScope, plan: GenerationPlan, drafts: tuple[GenerationResult, ...]) -> GenerationChunk:
+def build_synthesis_chunk(scope: AnyGenerationScope, plan: GenerationPlan, drafts: tuple[GenerationResult, ...]) -> GenerationChunk:
     """Send validated information units plus only the local evidence they cite."""
     if not plan.synthesis_input_tokens or len(drafts) != len(plan.chunks):
         raise GenerationBudgetExceeded("synthesis plan mismatch")

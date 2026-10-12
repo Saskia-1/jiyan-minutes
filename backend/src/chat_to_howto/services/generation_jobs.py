@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 import re
@@ -25,10 +26,14 @@ from chat_to_howto.providers.base import (
     ProviderTimeout,
 )
 from chat_to_howto.repositories.chat import ChatRepository
+from chat_to_howto.repositories.content import ContentRepository
 from chat_to_howto.services.evidence_validation import (
     EvidenceValidationRejected,
     EvidenceValidator,
     ValidatedGeneration,
+    ValidatedMixedGeneration,
+    AnyValidatedGeneration,
+    parse_validated_generation,
 )
 from chat_to_howto.services.generation_cache import (
     CacheCorrupt,
@@ -48,10 +53,13 @@ from chat_to_howto.services.generation_planning import (
     GenerationPlan,
     GenerationScopeBuilder,
     GenerationSelection,
+    MixedGenerationSelection,
+    MixedGenerationScopeBuilder,
     build_generation_plan,
     build_synthesis_chunk,
 )
-from chat_to_howto.services.generation_scope import GenerationScope
+from chat_to_howto.services.generation_scope import AnyGenerationScope, GenerationScope, MixedGenerationScope
+from chat_to_howto.services.mixed_search import MixedSearchService
 from chat_to_howto.services.generation_prompts import topic_prompt
 
 
@@ -188,7 +196,7 @@ class GenerationJobView(BaseModel):
     error_code: str | None
     revision: int = Field(ge=0)
     usage: GenerationUsage
-    result: ValidatedGeneration | None = Field(default=None, repr=False)
+    result: AnyValidatedGeneration | None = Field(default=None, repr=False)
 
 
 class GenerationJobOrchestrator:
@@ -202,6 +210,7 @@ class GenerationJobOrchestrator:
         preview_ttl: timedelta = timedelta(minutes=5),
         consent_ttl: timedelta = timedelta(minutes=5),
         max_daily_provider_requests: int = 100,
+        mixed_search: MixedSearchService | None = None,
     ) -> None:
         if not timedelta(0) < preview_ttl <= timedelta(minutes=15):
             raise ValueError("preview TTL must be between zero and fifteen minutes")
@@ -217,8 +226,9 @@ class GenerationJobOrchestrator:
         self._consent_ttl = consent_ttl
         self._max_daily_provider_requests = max_daily_provider_requests
         self._scope_builder = GenerationScopeBuilder(repository)
+        self._mixed_scope_builder = MixedGenerationScopeBuilder(mixed_search) if mixed_search is not None else None
         self._cache = GenerationCache(repository)
-        self._evidence_validator = EvidenceValidator(repository)
+        self._evidence_validator = EvidenceValidator(repository, ContentRepository(repository))
         self._active_lock = RLock()
         self._active_tokens: dict[str, CancellationToken] = {}
 
@@ -241,6 +251,19 @@ class GenerationJobOrchestrator:
         session_id: str,
     ) -> GenerationPreviewView:
         scope = self._scope_builder.build(selection, session_id=session_id)
+        return self._create_preview_from_scope(scope, session_id=session_id)
+
+    def create_mixed_preview(
+        self, selection: MixedGenerationSelection, *, session_id: str,
+    ) -> GenerationPreviewView:
+        if self._mixed_scope_builder is None:
+            raise GenerationAuthorizationError("mixed generation is unavailable")
+        scope = self._mixed_scope_builder.build(selection, session_id=session_id)
+        return self._create_preview_from_scope(scope, session_id=session_id)
+
+    def _create_preview_from_scope(
+        self, scope: AnyGenerationScope, *, session_id: str,
+    ) -> GenerationPreviewView:
         plan = build_generation_plan(
             scope,
             max_chunk_input_tokens=self._cache_settings.max_chunk_input_tokens,
@@ -368,9 +391,12 @@ class GenerationJobOrchestrator:
         return row
 
     @staticmethod
-    def _scope_from_row(row: dict[str, object]) -> GenerationScope:
+    def _scope_from_row(row: dict[str, object]) -> AnyGenerationScope:
         try:
-            return GenerationScope.model_validate_json(str(row["scope_json"]))
+            raw = str(row["scope_json"])
+            if json.loads(raw).get("schema_version") == 2:
+                return MixedGenerationScope.model_validate_json(raw)
+            return GenerationScope.model_validate_json(raw)
         except (KeyError, TypeError, ValueError):
             raise GenerationJobConflict("generation job scope is invalid") from None
 
@@ -394,7 +420,7 @@ class GenerationJobOrchestrator:
         result_json = row.get("result_json")
         try:
             result = (
-                ValidatedGeneration.model_validate_json(str(result_json))
+                parse_validated_generation(str(result_json))
                 if result_json is not None
                 else None
             )
@@ -471,13 +497,17 @@ class GenerationJobOrchestrator:
             if cancelled is not None:
                 return cancelled
             if not plan.chunks:
-                verified = ValidatedGeneration(
-                    batch_id=scope.batch_id,
-                    snapshot_id=scope.snapshot_id,
-                    scope_fingerprint=scope.fingerprint(),
-                    source_extraction_ids=(),
-                    result=GenerationResult.insufficient(),
-                    evidence=(),
+                verified = (
+                    ValidatedMixedGeneration(
+                        source_refs=scope.source_refs, snapshot_id=scope.snapshot_id,
+                        scope_fingerprint=scope.fingerprint(), source_extraction_ids=(),
+                        result=GenerationResult.insufficient(), evidence=(),
+                    ) if isinstance(scope, MixedGenerationScope) else
+                    ValidatedGeneration(
+                        batch_id=scope.batch_id, snapshot_id=scope.snapshot_id,
+                        scope_fingerprint=scope.fingerprint(), source_extraction_ids=(),
+                        result=GenerationResult.insufficient(), evidence=(),
+                    )
                 )
                 self._cache_put_digest(identity, verified, session_id_digest)
                 return self._complete(
@@ -565,9 +595,15 @@ class GenerationJobOrchestrator:
                     return self._fail_current(job_id, "extraction_incomplete")
                 extraction = parse_structured_extraction(chunk, response)
                 if scope.summary_type is not None:
+                    chunk_scope = (scope.model_copy(update={
+                        "messages": chunk.messages,
+                        "included_unit_ids": tuple(message.message_id for message in chunk.messages),
+                        "excluded_unit_ids": (),
+                    }) if isinstance(scope, MixedGenerationScope) else
+                        scope.model_copy(update={"messages": chunk.messages}))
                     self._validate_digest(
                         merge_extractions((extraction,)),
-                        scope=scope.model_copy(update={"messages": chunk.messages}),
+                        scope=chunk_scope,
                         session_digest=session_id_digest,
                     )
                 extractions.append(extraction)
@@ -639,7 +675,7 @@ class GenerationJobOrchestrator:
 
     def _cache_get_digest(
         self, identity: GenerationCacheIdentity, session_digest: str
-    ) -> ValidatedGeneration | None:
+    ) -> AnyValidatedGeneration | None:
         row = self._repository.get_generation_cache(
             cache_key=identity.cache_key, session_digest=session_digest
         )
@@ -647,7 +683,7 @@ class GenerationJobOrchestrator:
             return None
         try:
             persisted = GenerationCacheIdentity.model_validate_json(str(row["identity_json"]))
-            result = ValidatedGeneration.model_validate_json(str(row["result_json"]))
+            result = parse_validated_generation(str(row["result_json"]))
             if (
                 persisted != identity
                 or result.snapshot_id != identity.snapshot_id
@@ -661,7 +697,7 @@ class GenerationJobOrchestrator:
     def _cache_put_digest(
         self,
         identity: GenerationCacheIdentity,
-        result: ValidatedGeneration,
+        result: AnyValidatedGeneration,
         session_digest: str,
     ) -> None:
         self._repository.put_generation_cache(
@@ -673,7 +709,7 @@ class GenerationJobOrchestrator:
             result_json=result.model_dump_json(),
         )
 
-    def _validate_digest(self, merged, *, scope: GenerationScope, session_digest: str):
+    def _validate_digest(self, merged, *, scope: AnyGenerationScope, session_digest: str):
         return self._evidence_validator.validate_with_digest(
             merged,
             scope=scope,
@@ -699,7 +735,7 @@ class GenerationJobOrchestrator:
     def _complete(
         self,
         row: dict[str, object],
-        result: ValidatedGeneration,
+        result: AnyValidatedGeneration,
         *,
         cache_hit: bool,
     ) -> GenerationJobView:

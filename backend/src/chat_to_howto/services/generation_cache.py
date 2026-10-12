@@ -9,8 +9,8 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from chat_to_howto.api.session import digest
-from chat_to_howto.services.evidence_validation import ValidatedGeneration
-from chat_to_howto.services.generation_scope import GenerationScope
+from chat_to_howto.services.evidence_validation import AnyValidatedGeneration, parse_validated_generation
+from chat_to_howto.services.generation_scope import AnyGenerationScope
 
 
 class CacheCorrupt(RuntimeError):
@@ -53,14 +53,14 @@ class GenerationCacheIdentity(BaseModel):
 
 
 def build_cache_identity(
-    scope: GenerationScope,
+    scope: AnyGenerationScope,
     settings: GenerationCacheSettings,
 ) -> GenerationCacheIdentity:
     scope_fingerprint = scope.fingerprint()
     settings_fingerprint = settings.fingerprint()
     canonical = json.dumps(
         {
-            "version": 1,
+            "version": scope.schema_version,
             "snapshot_id": scope.snapshot_id,
             "scope_fingerprint": scope_fingerprint,
             "provider": scope.provider,
@@ -102,7 +102,7 @@ class GenerationCache:
         identity: GenerationCacheIdentity,
         *,
         session_id: str,
-    ) -> ValidatedGeneration | None:
+    ) -> AnyValidatedGeneration | None:
         row = self._repository.get_generation_cache(
             cache_key=identity.cache_key,
             session_digest=digest(session_id),
@@ -113,7 +113,7 @@ class GenerationCache:
             persisted_identity = GenerationCacheIdentity.model_validate_json(
                 str(row["identity_json"])
             )
-            result = ValidatedGeneration.model_validate_json(str(row["result_json"]))
+            result = parse_validated_generation(str(row["result_json"]))
             if (
                 persisted_identity != identity
                 or result.snapshot_id != identity.snapshot_id
@@ -127,7 +127,7 @@ class GenerationCache:
     def put(
         self,
         identity: GenerationCacheIdentity,
-        result: ValidatedGeneration,
+        result: AnyValidatedGeneration,
         *,
         session_id: str,
     ) -> None:

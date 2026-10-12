@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 import os
+from pathlib import Path
+import re
 import stat
 from typing import Literal
 from uuid import uuid4
@@ -25,7 +27,7 @@ class DeletionPlanView(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     plan_id: str
-    target_kind: Literal["document", "batch"]
+    target_kind: Literal["document", "batch", "content_batch"]
     target_id: str
     include_managed_files: bool
     fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -45,9 +47,19 @@ class DeletionResult(BaseModel):
 
 class DeletionService:
     def __init__(self, *, repository: ChatRepository, approved_roots: dict[str, ApprovedOutputRoot],
-                 clock=None, ttl: timedelta = timedelta(minutes=5)) -> None:
+                 clock=None, ttl: timedelta = timedelta(minutes=5), private_image_root: Path | None = None) -> None:
         self._repository = repository
         self._roots = dict(approved_roots)
+        if private_image_root is not None:
+            if "private-content-images" in self._roots:
+                raise ValueError("private image root identifier is reserved")
+            candidate = Path(private_image_root).absolute()
+            metadata = candidate.lstat()
+            if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o077:
+                raise ValueError("private image directory is unsafe")
+            self._roots["private-content-images"] = ApprovedOutputRoot(
+                path=candidate, root_id="private-content-images", device=metadata.st_dev, inode=metadata.st_ino,
+            )
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._ttl = ttl
 
@@ -57,9 +69,9 @@ class DeletionService:
             raise ValueError("deletion clock must be timezone-aware")
         return value.astimezone(timezone.utc)
 
-    def create_plan(self, *, target_kind: Literal["document", "batch"], target_id: str,
+    def create_plan(self, *, target_kind: Literal["document", "batch", "content_batch"], target_id: str,
                     include_managed_files: bool, session_id: str) -> DeletionPlanView:
-        if target_kind not in {"document", "batch"} or not target_id:
+        if target_kind not in {"document", "batch", "content_batch"} or not target_id:
             raise ValueError("invalid deletion target")
         session_hash = digest(session_id)
         impact = self._repository.deletion_impact(
@@ -101,9 +113,10 @@ class DeletionService:
             raise DeletionConflict("deletion target changed")
         impact_json = _canonical(impact)
         staged: list[dict[str, str]] = []
-        if bool(plan["include_managed_files"]):
+        files_to_stage = list(impact["private_images"]) + (list(impact["managed_files"]) if bool(plan["include_managed_files"]) else [])
+        if files_to_stage:
             try:
-                staged = self._stage_files(plan_id, impact["managed_files"])
+                staged = self._stage_files(plan_id, files_to_stage)
             except BaseException:
                 self._restore_files(staged)
                 raise
@@ -154,6 +167,11 @@ class DeletionService:
                 root = self._roots.get(item["root_id"])
                 if root is None:
                     raise PermissionError("managed output root is unavailable")
+                if item["root_id"] == "private-content-images" and (
+                    item["parent"] != "." or item["kind"] != "file"
+                    or re.fullmatch(r"[0-9a-f]{32}\.(?:png|jpg)", item["name"]) is None
+                ):
+                    raise PermissionError("private screenshot target is invalid")
                 root_fd = root.open_bound(); parent_fd = None
                 staged_name = f".delete-{sha256(plan_id.encode()).hexdigest()[:16]}-{index}"
                 try:
@@ -264,9 +282,15 @@ def _plan_view(plan_id: str, target_kind: str, target_id: str, include: bool,
         "snapshots": len(impact["snapshot_ids"]),
         "messages": len(impact["message_ids"]),
         "managed_files": len(impact["managed_files"]),
+        "content_batches": len(impact["content_batch_ids"]),
+        "content_units": len(impact["content_unit_ids"]),
+        "content_images": len(impact["private_images"]),
     }
     effects = ("数据库：删除本地生成结果、不可变版本历史与衍生文档记录", "缓存：撤销相关生成缓存、授权预览与任务记录") if target_kind == "document" else (
         "数据库：删除导出批次、已导入快照与无其他引用的消息", "衍生数据：删除依赖该快照的生成结果、版本、文档和缓存",
+    ) if target_kind == "batch" else (
+        "数据库：删除选定的截图／笔记批次及正文", "衍生数据：删除依赖该批次的生成结果、版本、文档和缓存",
+        "私有原图：随该导入批次一同删除，不受导出文件选项影响",
     )
     if target_kind == "batch" and int(impact.get("shared_message_count", 0)):
         effects += (

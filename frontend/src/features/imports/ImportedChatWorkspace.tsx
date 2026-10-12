@@ -33,7 +33,9 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
   const [selectedChatSnapshot, setSelectedChatSnapshot] = useState(false);
   const [includeUnknownTime, setIncludeUnknownTime] = useState(false);
   const [mixedHits, setMixedHits] = useState<MixedSearchHit[] | null>(null);
+  const [mixedSelectedIds, setMixedSelectedIds] = useState<string[]>([]);
   const [mixedError, setMixedError] = useState("");
+  const mixedMode = mixedOpen && (selectedChatSnapshot || selectedContentBatches.length > 0);
   const disabled = locked || importBusy || searchBusy;
   const request = useMemo<ChatSearchRequest | null>(() => {
     if (!committed || !selected.length) return null;
@@ -53,6 +55,7 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
     return () => { active = false; };
   }, [api, requestKey, committed?.snapshot_id]);
   useEffect(() => { setCandidates(null); setTerms([]); setNotice(""); }, [topic, autoExpand]);
+  useEffect(() => { setMixedHits(null); setMixedSelectedIds([]); }, [topic, autoExpand, start, end, includeUnknownTime]);
   useEffect(() => {
     if (!mixedOpen) return;
     let active = true;
@@ -94,7 +97,7 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
     } catch (caught) { setError("没有找到可整理的完整范围，请调整关键词、时间或排除项后重试。"); throw caught; }
   }
   async function searchMixedSources() {
-    setMixedError(""); setMixedHits(null);
+    setMixedError(""); setMixedHits(null); setMixedSelectedIds([]);
     const source_refs = [
       ...(selectedChatSnapshot && committed ? [{ kind: "chat_snapshot" as const, id: committed.snapshot_id }] : []),
       ...selectedContentBatches.map(id => ({ kind: "content_batch" as const, id })),
@@ -102,11 +105,38 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
     if (!source_refs.length || !topic.trim()) { setMixedError("先勾选来源并填写主题。"); return; }
     setSearchBusy(true);
     try {
-      const page = await api.searchMixed({ source_refs, include_undated: includeUnknownTime, terms: [topic.trim()],
-        ...(start && end && request ? { start_time: request.start_time, end_time: request.end_time } : {}) });
+      if ((start && !end) || (end && !start)) throw new Error("incomplete_range");
+      let expanded = [topic.trim()];
+      if (autoExpand) {
+        try { const value = await api.expandTopic(topic.trim()); expanded = value.terms;
+          if (value.degraded) setNotice("关键词扩展暂不可用，已使用原主题搜索。");
+        } catch { setNotice("关键词扩展暂不可用，已使用原主题搜索。"); }
+      }
+      setTerms(expanded);
+      const first = start ? utcInput(start, committed?.display_timezone || "Asia/Shanghai") : null;
+      const last = end ? utcInput(end, committed?.display_timezone || "Asia/Shanghai") : null;
+      if ((start && !first) || (end && !last) || (first && last && Date.parse(first) >= Date.parse(last))) throw new Error("invalid_range");
+      const page = await api.searchMixed({ source_refs, include_undated: includeUnknownTime, terms: expanded,
+        ...(first && last ? { start_time: first, end_time: last } : {}) });
       setMixedHits(page.hits);
     } catch { setMixedError("混合检索失败；请检查来源、时间范围后重试。"); }
     finally { setSearchBusy(false); }
+  }
+  async function prepareMixedPreview() {
+    const source_refs = [
+      ...(selectedChatSnapshot && committed ? [{ kind: "chat_snapshot" as const, id: committed.snapshot_id }] : []),
+      ...selectedContentBatches.map(id => ({ kind: "content_batch" as const, id })),
+    ];
+    if (!mixedHits?.length || !mixedSelectedIds.length || !source_refs.length || !topic.trim()) throw new Error("empty_mixed_scope");
+    const first = start ? utcInput(start, committed?.display_timezone || "Asia/Shanghai") : null;
+    const last = end ? utcInput(end, committed?.display_timezone || "Asia/Shanghai") : null;
+    if ((start && !first) || (end && !last) || (first && last && Date.parse(first) >= Date.parse(last))) throw new Error("invalid_range");
+    return api.previewMixedGeneration({ source_refs, included_unit_ids: mixedHits.map(hit => hit.unit_id),
+      excluded_unit_ids: mixedHits.filter(hit => !mixedSelectedIds.includes(hit.unit_id)).map(hit => hit.unit_id),
+      topic: topic.trim(), mode: "complete", summary_type: direction,
+      include_undated: includeUnknownTime,
+      ...(first && last ? { start_time: first, end_time: last } : {}),
+    });
   }
   const visible = candidates || messages;
   const analysis = committed?.analysis;
@@ -141,19 +171,20 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
         {mixedOpen && <>
           <p className="muted">只检索下方明确勾选的整个来源批次；不会自动纳入生成。</p>
           {committed && <label className="check"><input type="checkbox" checked={selectedChatSnapshot} disabled={disabled}
-            onChange={event => { setSelectedChatSnapshot(event.target.checked); setMixedHits(null); }} />当前聊天导入批次（全部会话）</label>}
+            onChange={event => { setSelectedChatSnapshot(event.target.checked); setMixedHits(null); setMixedSelectedIds([]); }} />当前聊天导入批次（全部会话）</label>}
           {contentBatches.map((batch, index) => <label className="check" key={batch.batch_id}><input type="checkbox" checked={selectedContentBatches.includes(batch.batch_id)} disabled={disabled}
-            onChange={event => { setSelectedContentBatches(current => event.target.checked ? [...current, batch.batch_id] : current.filter(id => id !== batch.batch_id)); setMixedHits(null); }} />截图／笔记批次 {index + 1} · {batch.unit_count} 条正文</label>)}
+            onChange={event => { setSelectedContentBatches(current => event.target.checked ? [...current, batch.batch_id] : current.filter(id => id !== batch.batch_id)); setMixedHits(null); setMixedSelectedIds([]); }} />截图／笔记批次 {index + 1} · {batch.unit_count} 条正文</label>)}
           {!contentBatches.length && <p>还没有已导入的截图或笔记。可在上方导入。</p>}
           <label className="check"><input type="checkbox" checked={includeUnknownTime} disabled={disabled}
-            onChange={event => { setIncludeUnknownTime(event.target.checked); setMixedHits(null); }} />包含时间未知的聊天与笔记</label>
+            onChange={event => { setIncludeUnknownTime(event.target.checked); setMixedHits(null); setMixedSelectedIds([]); }} />包含时间未知的聊天与笔记</label>
           <button type="button" disabled={disabled || !topic.trim()} onClick={() => void searchMixedSources()}>预览勾选来源的相关正文</button>
           {mixedError && <p role="alert">{mixedError}</p>}
-          {mixedHits && <details><summary>相关正文 {mixedHits.length} 条</summary><ol>{mixedHits.map(hit => <li key={hit.unit_id}>
+          {mixedHits && <details open><summary>相关正文 {mixedHits.length} 条 · 已选择 {mixedSelectedIds.length} 条</summary><ol>{mixedHits.map(hit => <li key={hit.unit_id}>
             <strong>{hit.source_kind === "note_passage" ? "笔记／网页" : "聊天消息"}</strong> · {hit.timestamp || "时间未知"}
-            <p>{hit.text}</p>
+            <p>{hit.text}</p><label className="check"><input type="checkbox" checked={mixedSelectedIds.includes(hit.unit_id)} disabled={disabled}
+              onChange={event => setMixedSelectedIds(current => event.target.checked ? [...current, hit.unit_id] : current.filter(id => id !== hit.unit_id))} />纳入整理</label>
           </li>)}</ol></details>}
-          <p className="muted">已导入，暂不可跨来源整理；后续会在生成前逐条确认并排除。</p>
+          <p className="muted">只会发送逐条勾选的正文；未勾选的结果会被排除。生成前仍会显示完整外发预览。</p>
         </>}
       </details>
     </section>
@@ -171,7 +202,9 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
       <GenerationPanel api={api} compact sourceId="manual" account={committed?.account_id || ""}
         conversationSelectionIds={selected} conversationLabels={[]} excludedMessageIds={excluded} snapshotId={committed?.snapshot_id || null}
         rangeStart={request?.start_time || ""} rangeEnd={request?.end_time || ""} direction={direction} retrievalTopic={topic}
-        disabled={importBusy || searchBusy || !request} onScopeLockChange={updateLock} prepareSelection={prepare} onComplete={complete} />
+        disabled={importBusy || searchBusy || (mixedMode ? !mixedSelectedIds.length : !request)} onScopeLockChange={updateLock}
+        scopeRevision={JSON.stringify([mixedMode, selectedChatSnapshot, selectedContentBatches, mixedHits?.map(hit => hit.unit_id), mixedSelectedIds, includeUnknownTime, start, end])}
+        {...(mixedMode ? { preparePreview: prepareMixedPreview } : { prepareSelection: prepare })} onComplete={complete} />
     </section>
     <DocumentEditor key={jobId || (openedDocument ? `${openedDocument.document_id}:${openedDocument.current_version.version_id}` : "empty")} compact api={api} generationJobId={jobId} initialDocument={openedDocument} />
     <details><summary>已保存的文档</summary><DocumentLibrary key={jobId || "history"} api={api} outputRootId={outputRootId}

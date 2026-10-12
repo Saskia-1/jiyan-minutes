@@ -189,11 +189,20 @@ class ContentImportService:
                 kinds.add(classified.kind)
                 if classified.boundary_uncertain and status == "ready":
                     status = "boundary_uncertain"
-                for line in classified.body_lines:
+                if classified.kind == "note" and classified.body_lines:
+                    # OCR returns visual lines, not semantic paragraphs. Keep one
+                    # note page together so retrieval cannot select only one line.
                     units.append(PreviewUnit(
-                        unit_id=f"candidate-{len(units)}", kind="chat_message" if classified.kind == "chat" else "note_passage",
-                        group_id=ref, text=line.text.strip(), order=len(units), image_ref=ref,
+                        unit_id=f"candidate-{len(units)}", kind="note_passage", group_id=ref,
+                        text="\n".join(line.text.strip() for line in classified.body_lines),
+                        order=len(units), image_ref=ref,
                     ))
+                else:
+                    for line in classified.body_lines:
+                        units.append(PreviewUnit(
+                            unit_id=f"candidate-{len(units)}", kind="chat_message" if classified.kind == "chat" else "note_passage",
+                            group_id=ref, text=line.text.strip(), order=len(units), image_ref=ref,
+                        ))
             suggested = next(iter(kinds)) if len(kinds) == 1 else "uncertain"
             if len(units) > _MAX_UNITS:
                 raise ValueError("content_unit_limit_exceeded")

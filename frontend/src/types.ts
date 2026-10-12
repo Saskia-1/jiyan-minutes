@@ -151,11 +151,13 @@ export interface TopicSection extends HowToEvidenceItem { heading: string; text:
 export interface TopicSummary { summary_type: Exclude<SummaryType, "how_to">; sections: TopicSection[] }
 export type ChatSummary = LegacyChatSummary | TopicSummary;
 export interface ValidatedEvidence {
-  message_id: string; conversation_id: string; timestamp: string | null; sender_id: string | null;
+  message_id: string; conversation_id: string | null; timestamp: string | null; sender_id: string | null;
   sender_name: string | null; quote: string;
+  source_kind?: ContentUnitKind; source_batch_id?: string; image_id?: string;
 }
 export interface ValidatedGeneration {
-  evidence_status: "verified"; batch_id: string; snapshot_id: string; scope_fingerprint: string;
+  evidence_status: "verified"; schema_version?: 2; batch_id?: string; source_refs?: SourceRef[];
+  snapshot_id: string; scope_fingerprint: string;
   source_extraction_ids: string[]; result: HowToResult; evidence: ValidatedEvidence[];
 }
 export interface GenerationJob {
@@ -180,7 +182,7 @@ export interface DocumentVersion {
   change_summary: string; created_at: string; content: HowToResult;
 }
 export interface HowToDocument {
-  document_id: string; source_generation_job_id: string; source_snapshot_id: string;
+  document_id: string; source_generation_job_id: string; source_snapshot_id: string | null; source_refs?: SourceRef[];
   created_at: string; updated_at: string; current_version: DocumentVersion;
   versions: DocumentVersion[]; source_evidence: ValidatedEvidence[];
 }
@@ -193,11 +195,11 @@ export interface DocumentArtifact {
 export const deletionCountKeys = [
   "documents", "versions", "document_artifacts", "generation_jobs", "generation_requests", "generation_consents",
   "generation_previews", "cache_entries", "export_batches", "export_jobs", "export_consents",
-  "snapshots", "messages", "managed_files",
+  "snapshots", "messages", "managed_files", "content_batches", "content_units", "content_images",
 ] as const;
 export type DeletionCountKey = typeof deletionCountKeys[number];
 export interface DeletionPlan {
-  plan_id: string; target_kind: "document" | "batch"; target_id: string;
+  plan_id: string; target_kind: "document" | "batch" | "content_batch"; target_id: string;
   include_managed_files: boolean; fingerprint: string;
   counts: Record<DeletionCountKey, number>; effects: string[]; expires_at: string;
 }
@@ -271,6 +273,11 @@ export interface MixedSearchHit {
   source_order: number | null; image_id: string | null;
 }
 export interface MixedSearchPage { hits: MixedSearchHit[] }
+export interface MixedGenerationRequest {
+  source_refs: SourceRef[]; included_unit_ids: string[]; excluded_unit_ids: string[];
+  topic: string; mode: "fast" | "complete"; summary_type: SummaryType;
+  include_undated: boolean; start_time?: string | null; end_time?: string | null;
+}
 export function isTrustedRealReport(value: unknown, source: Source | undefined): boolean {
   if (!source || typeof value !== "object" || value === null) return false;
   const report = value as Record<string, unknown>;

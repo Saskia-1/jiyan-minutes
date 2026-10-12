@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ApiError, type LocalApiClient } from "../../api/client";
 import type { ContentBatch, ContentPreview, ContentUnitEdit } from "../../types";
+import { DeletionControl } from "../data/DeletionControl";
 
 const MAX_IMAGE = 15 * 1024 * 1024;
 const MAX_TOTAL = 64 * 1024 * 1024;
@@ -171,9 +172,13 @@ export function ContentImportPanel({ api, busy, onCommitted }: {
     </section>}
     <section aria-label="已导入截图或笔记"><h3>已导入截图或笔记</h3>
       {!batches.length && <p>还没有已确认的截图或笔记。</p>}
-      {batches.map(item => <p key={item.batch_id}>已导入 {item.unit_count} 条正文 · {item.image_count} 张截图</p>)}
+      {batches.map(item => <div key={item.batch_id}><p>已导入 {item.unit_count} 条正文 · {item.image_count} 张截图</p>
+        <DeletionControl api={api} targetKind="content_batch" targetId={item.batch_id}
+          label="删除这次截图／笔记导入" disabled={locked}
+          onDeleted={() => setBatches(current => current.filter(batch => batch.batch_id !== item.batch_id))} />
+      </div>)}
       {cursor && <button type="button" disabled={locked || historyBusy} onClick={() => void loadMore()}>加载更早批次</button>}
-      {!!batches.length && <p className="muted">已导入，暂不可跨来源整理；混合检索接入后可逐项选择。</p>}
+      {!!batches.length && <p className="muted">已导入。到“聊天内容”的混合检索中勾选来源，再逐条确认要纳入整理的正文。</p>}
     </section>
   </section>;
 }

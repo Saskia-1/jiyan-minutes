@@ -160,7 +160,7 @@ def test_migrations_are_versioned_idempotent_and_configure_sqlite(tmp_path: Path
     """A restart keeps one migration history and safe SQLite connection settings."""
     path = tmp_path / "synthetic.sqlite3"
 
-    assert apply_migrations(path) == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+    assert apply_migrations(path) == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
     assert apply_migrations(path) == ()
 
     connection = open_connection(path)
@@ -172,7 +172,7 @@ def test_migrations_are_versioned_idempotent_and_configure_sqlite(tmp_path: Path
         foreign_keys = connection.execute("PRAGMA foreign_keys").fetchone()[0]
         busy_timeout = connection.execute("PRAGMA busy_timeout").fetchone()[0]
 
-        assert versions == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,)]
+        assert versions == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,), (13,), (14,)]
         assert {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")} >= {"content_batches", "content_images", "content_units"}
         assert journal_mode == "wal"
         assert foreign_keys == 1
@@ -209,13 +209,13 @@ def test_eight_simultaneous_migrators_apply_one_version_without_a_race(tmp_path:
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda _: apply_migrations(path), range(8)))
 
-    assert results.count((1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)) == 1
+    assert results.count((1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)) == 1
     assert results.count(()) == 7
     connection = open_connection(path)
     try:
         assert connection.execute(
             "SELECT version FROM chat_schema_migrations ORDER BY version"
-        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,)]
+            ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,), (13,), (14,)]
     finally:
         connection.close()
 
@@ -227,14 +227,14 @@ def test_legacy_v1_upgrade_is_idempotent_preserves_data_and_marks_unknown_scope(
     path = tmp_path / "synthetic.sqlite3"
     _create_legacy_v1_database(path)
 
-    assert apply_migrations(path) == (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+    assert apply_migrations(path) == (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
     assert apply_migrations(path) == ()
 
     connection = open_connection(path)
     try:
         assert connection.execute(
             "SELECT version FROM chat_schema_migrations ORDER BY version"
-        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,)]
+            ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,), (13,), (14,)]
         assert connection.execute(
             "SELECT text FROM chat_messages WHERE message_id = 'message:v1:legacy'"
         ).fetchone() == ("synthetic legacy body",)
@@ -278,14 +278,14 @@ def test_eight_simultaneous_migrators_upgrade_legacy_v1_once(tmp_path: Path) -> 
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda _: apply_migrations(path), range(8)))
 
-    assert results.count((2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)) == 1
+    assert results.count((2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)) == 1
     assert results.count(()) == 7
     connection = open_connection(path)
     try:
         assert connection.execute("SELECT COUNT(*) FROM chat_messages").fetchone() == (1,)
         assert connection.execute(
             "SELECT version FROM chat_schema_migrations ORDER BY version"
-        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,)]
+            ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,), (13,), (14,)]
     finally:
         connection.close()
 

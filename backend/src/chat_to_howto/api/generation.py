@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from chat_to_howto.api.export_jobs import SafeValidationRoute
 from chat_to_howto.domain.generation import SummaryType
+from chat_to_howto.domain.mixed_sources import SourceRef
 from chat_to_howto.services.generation_jobs import (
     GenerationAuthorizationError,
     GenerationConsentGrant,
@@ -25,6 +26,7 @@ from chat_to_howto.services.generation_jobs import (
 from chat_to_howto.services.generation_planning import (
     GenerationBudgetExceeded,
     GenerationSelection,
+    MixedGenerationSelection,
 )
 from chat_to_howto.services.topic_expansion import TopicExpansionService, TopicExpansionView
 
@@ -115,6 +117,23 @@ class GenerationConsentRequest(_Request):
     confirmed: Literal[True]
 
 
+class MixedGenerationRequest(_Request):
+    source_refs: tuple[SourceRef, ...] = Field(min_length=1, max_length=50)
+    included_unit_ids: tuple[str, ...] = Field(min_length=1, max_length=2_000)
+    excluded_unit_ids: tuple[str, ...] = Field(default=(), max_length=2_000)
+    topic: str = Field(min_length=1, max_length=512, repr=False)
+    mode: Literal["fast", "complete"]
+    summary_type: SummaryType
+    include_undated: bool = False
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+
+    @field_validator("source_refs", "included_unit_ids", "excluded_unit_ids", mode="before")
+    @classmethod
+    def _parse_sequences(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
+
+
 class StartGenerationRequest(_Request):
     consent_id: str = Field(min_length=1, max_length=128, pattern=_OPAQUE_PATTERN)
     idempotency_key: str = Field(min_length=1, max_length=128, pattern=_OPAQUE_PATTERN)
@@ -135,6 +154,7 @@ def create_generation_router(
     require_session: Callable[[], str],
     require_csrf: Callable[[], object],
     resolve_selection: Callable[[SelectionGenerationRequest, str], GenerationSelection],
+    resolve_mixed_selection: Callable[[MixedGenerationRequest, str], MixedGenerationSelection] | None = None,
 ) -> APIRouter:
     router = APIRouter(
         prefix="/api/generation",
@@ -183,6 +203,20 @@ def create_generation_router(
             return service.create_preview(
                 resolve_selection(request, session_id), session_id=session_id
             )
+        except Exception as error:
+            raise _http_error(error) from None
+
+    @router.post("/mixed/previews", response_model=GenerationPreviewView, status_code=status.HTTP_201_CREATED)
+    def create_mixed_preview(
+        request: MixedGenerationRequest,
+        service: GenerationJobOrchestrator = Depends(get_orchestrator),
+        session_id: str = Depends(require_session),
+        _csrf: object = Depends(require_csrf),
+    ) -> GenerationPreviewView:
+        try:
+            if resolve_mixed_selection is None:
+                raise GenerationAuthorizationError("mixed generation is unavailable")
+            return service.create_mixed_preview(resolve_mixed_selection(request, session_id), session_id=session_id)
         except Exception as error:
             raise _http_error(error) from None
 
@@ -274,7 +308,7 @@ def create_generation_router(
 
 
 def _http_error(error: Exception) -> HTTPException:
-    if isinstance(error, GenerationAuthorizationError):
+    if isinstance(error, (GenerationAuthorizationError, PermissionError)):
         return HTTPException(status_code=403, detail="generation authorization is unavailable")
     if isinstance(error, GenerationJobNotFound):
         return HTTPException(status_code=404, detail="generation job was not found")

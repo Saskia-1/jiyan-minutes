@@ -41,7 +41,8 @@ def test_document_deletion_plan_is_exact_stale_safe_and_deletes_managed_files(tm
         assert stale.counts == {"documents": 1, "versions": 1, "document_artifacts": 1,
             "generation_jobs": 1, "generation_requests": 1, "generation_consents": 1, "generation_previews": 1,
             "cache_entries": 1, "export_batches": 0, "export_jobs": 0,
-            "export_consents": 0, "snapshots": 0, "messages": 0, "managed_files": 1}
+            "export_consents": 0, "snapshots": 0, "messages": 0, "managed_files": 1,
+            "content_batches": 0, "content_units": 0, "content_images": 0}
         documents.create_version(document.document_id, parent_version_id=document.current_version.version_id,
             content=document.current_version.content.model_copy(update={"title": "new"}),
             change_summary="changed after plan", session_id="session-a")
