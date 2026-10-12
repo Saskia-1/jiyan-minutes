@@ -9,6 +9,7 @@ import {
   type ImportCommit, type ImportPreview, type ImportPreviewRequest, type ImportRecoveryPage,
   type ContentBatch, type ContentBatchPage, type ContentPreview, type ContentPreviewRequest,
   type ContentUnitEdit,
+  type MixedSearchPage, type MixedSearchRequest,
 } from "../types";
 
 export class ApiError extends Error {
@@ -622,6 +623,23 @@ function parseContentBatchPage(value: unknown): ContentBatchPage {
   if (new Set(items.map(item => item.batch_id)).size !== items.length) return invalid();
   return { items, next_cursor: value.next_cursor === null ? null : requiredString(value.next_cursor) };
 }
+function parseMixedSearchPage(value: unknown): MixedSearchPage {
+  if (!isObject(value) || !Array.isArray(value.hits)) return invalid();
+  exactPublicFields(value, ["hits"]);
+  const hits = value.hits.map(item => {
+    if (!isObject(item) || !isObject(item.source_ref)) return invalid();
+    exactPublicFields(item, ["unit_id", "source_kind", "source_ref", "text", "sender_name", "timestamp", "source_order", "image_id"]);
+    exactPublicFields(item.source_ref, ["kind", "id"]);
+    return { unit_id: requiredString(item.unit_id), source_kind: member(["chat_message", "note_passage"] as const, item.source_kind),
+      source_ref: { kind: member(["chat_snapshot", "content_batch"] as const, item.source_ref.kind), id: requiredString(item.source_ref.id) },
+      text: requiredString(item.text), sender_name: nullableString(item.sender_name),
+      timestamp: item.timestamp === null ? null : expiresAt(item.timestamp),
+      source_order: item.source_order === null ? null : Number.isInteger(item.source_order) && Number(item.source_order) >= 0 ? Number(item.source_order) : invalid(),
+      image_id: nullableString(item.image_id) };
+  });
+  if (new Set(hits.map(item => item.unit_id)).size !== hits.length) return invalid();
+  return { hits };
+}
 function validExportSelection(value: ExportSelection): boolean {
   return sourceIds.includes(value.source_id) && !!value.account_id.trim() && !!value.output_root_id.trim() &&
     validTimezone(value.display_timezone) && value.conversation_selection_ids.length > 0 && value.conversation_selection_ids.length <= 50 &&
@@ -828,6 +846,13 @@ export function createClient() {
       const blob = await response.blob();
       if (blob.size > 15 * 1024 * 1024) throw new ApiError(0);
       return blob;
+    },
+    searchMixed: (query: MixedSearchRequest) => {
+      if (!query.source_refs.length || query.source_refs.length > 50 || new Set(query.source_refs.map(item => `${item.kind}:${item.id}`)).size !== query.source_refs.length ||
+          query.terms.length < 1 || query.terms.length > 10 || query.terms.some(item => item.length > 512) ||
+          (query.start_time != null && !Number.isFinite(Date.parse(query.start_time))) ||
+          (query.end_time != null && !Number.isFinite(Date.parse(query.end_time)))) return Promise.reject(new ApiError(0));
+      return request("/api/mixed-search", parseMixedSearchPage, query);
     },
     searchChats: (search: ChatSearchRequest) => {
       const validSource = sourceIds.includes(search.source_id as SourceId) || search.source_id === "manual";

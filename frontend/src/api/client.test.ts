@@ -79,6 +79,25 @@ it("截图与笔记客户端按严格契约发送预览和 PATCH 校对，不接
   expect(requests[2].headers.get("X-CSRF-Token")).toBe("csrf-1");
 });
 
+it("混合检索保持笔记与聊天的类型，并拒绝重复的同一来源", async () => {
+  const batch = "a".repeat(32);
+  const requests: Request[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = asRequest(input, init); requests.push(request.clone());
+    if (new URL(request.url).pathname === "/api/session") return json({ csrf_token: "csrf-1", expires_at: "2099-01-01T00:00:00Z" });
+    return json({ hits: [{ unit_id: "content:v1:note:" + "b".repeat(64), source_kind: "note_passage",
+      source_ref: { kind: "content_batch", id: batch }, text: "合成笔记", sender_name: null,
+      timestamp: null, source_order: 0, image_id: null }] });
+  }));
+  const client = createClient();
+  const source_refs = [{ kind: "content_batch" as const, id: batch }];
+  const result = await client.searchMixed({ source_refs, include_undated: true, terms: ["笔记"] });
+  expect(result.hits[0].source_kind).toBe("note_passage");
+  expect(await requests[1].json()).toEqual({ source_refs, include_undated: true, terms: ["笔记"] });
+  await expect(client.searchMixed({ source_refs: [...source_refs, ...source_refs], include_undated: true, terms: ["笔记"] })).rejects.toBeInstanceOf(ApiError);
+  expect(requests).toHaveLength(2);
+});
+
 it("所有并发保护 GET 先共享一次 session bootstrap", async () => {
   const paths: string[] = [];
   let bootstrapped = false;

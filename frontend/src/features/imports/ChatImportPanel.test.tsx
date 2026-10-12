@@ -44,6 +44,33 @@ it("现有聊天入口保留，并可展开本机截图／笔记导入", async (
   expect(screen.getByLabelText("聊天记录文件")).toBeVisible();
 });
 
+it("混合检索只发送明确勾选的来源，时间未知内容需单独选择", async () => {
+  const contentBatch = { batch_id: "c".repeat(32), unit_count: 1, image_count: 0,
+    images: [], created_at_utc: "2026-10-12T00:00:00Z" };
+  const api = {
+    recoverImports: vi.fn().mockResolvedValue({ imports: [committed], next_cursor: null }),
+    recoverContentBatches: vi.fn().mockResolvedValue({ items: [contentBatch], next_cursor: null }),
+    searchChats: vi.fn().mockResolvedValue({ results: [], next_cursor: null }),
+    searchMixed: vi.fn().mockResolvedValue({ hits: [{ unit_id: "content:v1:note:" + "a".repeat(64), source_kind: "note_passage",
+      source_ref: { kind: "content_batch", id: contentBatch.batch_id }, text: "音乐笔记", sender_name: null,
+      timestamp: null, source_order: 0, image_id: null }] }),
+  } as unknown as LocalApiClient;
+  const { ChatImportPanel } = await import("./ChatImportPanel");
+  const user = userEvent.setup();
+  render(<ChatImportPanel compact api={api} outputRootId="fixture-root" />);
+  await screen.findByText(/当前聊天/);
+  await user.type(screen.getByRole("textbox", { name: "关键词" }), "音乐");
+  await user.click(screen.getByText("选择截图／笔记与聊天来源，预览混合检索"));
+  await user.click(await screen.findByRole("checkbox", { name: /截图／笔记批次 1/ }));
+  await user.click(screen.getByRole("checkbox", { name: "包含时间未知的聊天与笔记" }));
+  await user.click(screen.getByRole("button", { name: "预览勾选来源的相关正文" }));
+  await waitFor(() => expect(api.searchMixed).toHaveBeenCalledWith({
+    source_refs: [{ kind: "content_batch", id: contentBatch.batch_id }], include_undated: true, terms: ["音乐"],
+  }));
+  await user.click(screen.getByText("相关正文 1 条"));
+  expect(await screen.findByText("音乐笔记")).toBeVisible();
+});
+
 it("简洁导入无时间聊天默认折叠，展开排除后只整理剩余消息", async () => {
   const rows = ["收藏歌单", "无关消息"].map((text, index) => ({
     message_id: `message:${index}`, conversation_id: "c", timestamp: null, source_order: index + 1,

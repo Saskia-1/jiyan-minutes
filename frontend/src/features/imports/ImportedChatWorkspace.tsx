@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { LocalApiClient } from "../../api/client";
-import type { ChatSearchRequest, ChatSearchResult, GenerationSelectionRequest, HowToDocument, ImportCommit, SummaryType } from "../../types";
+import type { ChatSearchRequest, ChatSearchResult, ContentBatch, GenerationSelectionRequest, HowToDocument, ImportCommit, MixedSearchHit, SummaryType } from "../../types";
 import { GenerationPanel } from "../generation/GenerationPanel";
 import { DocumentEditor } from "../documents/DocumentEditor";
 import { DocumentLibrary } from "../documents/DocumentLibrary";
@@ -27,6 +27,13 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
   const [selected, setSelected] = useState(committed?.conversations.map(item => item.conversation_selection_id) || []);
   const [jobId, setJobId] = useState<string>();
   const [openedDocument, setOpenedDocument] = useState<HowToDocument | null>(null);
+  const [mixedOpen, setMixedOpen] = useState(false);
+  const [contentBatches, setContentBatches] = useState<ContentBatch[]>([]);
+  const [selectedContentBatches, setSelectedContentBatches] = useState<string[]>([]);
+  const [selectedChatSnapshot, setSelectedChatSnapshot] = useState(false);
+  const [includeUnknownTime, setIncludeUnknownTime] = useState(false);
+  const [mixedHits, setMixedHits] = useState<MixedSearchHit[] | null>(null);
+  const [mixedError, setMixedError] = useState("");
   const disabled = locked || importBusy || searchBusy;
   const request = useMemo<ChatSearchRequest | null>(() => {
     if (!committed || !selected.length) return null;
@@ -46,6 +53,14 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
     return () => { active = false; };
   }, [api, requestKey, committed?.snapshot_id]);
   useEffect(() => { setCandidates(null); setTerms([]); setNotice(""); }, [topic, autoExpand]);
+  useEffect(() => {
+    if (!mixedOpen) return;
+    let active = true;
+    void api.recoverContentBatches(null).then(page => {
+      if (active) setContentBatches(page.items);
+    }).catch(() => { if (active) setMixedError("无法读取已导入的截图或笔记批次。"); });
+    return () => { active = false; };
+  }, [api, mixedOpen]);
   const updateLock = useCallback((value: boolean) => { setLocked(value); onScopeLockChange(value); }, [onScopeLockChange]);
   const complete = useCallback((id: string) => { setJobId(id); setOpenedDocument(null); }, []);
 
@@ -78,6 +93,21 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
       return selection(values.map(item => item.message_id));
     } catch (caught) { setError("没有找到可整理的完整范围，请调整关键词、时间或排除项后重试。"); throw caught; }
   }
+  async function searchMixedSources() {
+    setMixedError(""); setMixedHits(null);
+    const source_refs = [
+      ...(selectedChatSnapshot && committed ? [{ kind: "chat_snapshot" as const, id: committed.snapshot_id }] : []),
+      ...selectedContentBatches.map(id => ({ kind: "content_batch" as const, id })),
+    ];
+    if (!source_refs.length || !topic.trim()) { setMixedError("先勾选来源并填写主题。"); return; }
+    setSearchBusy(true);
+    try {
+      const page = await api.searchMixed({ source_refs, include_undated: includeUnknownTime, terms: [topic.trim()],
+        ...(start && end && request ? { start_time: request.start_time, end_time: request.end_time } : {}) });
+      setMixedHits(page.hits);
+    } catch { setMixedError("混合检索失败；请检查来源、时间范围后重试。"); }
+    finally { setSearchBusy(false); }
+  }
   const visible = candidates || messages;
   const analysis = committed?.analysis;
   return <div className="simple-workspace">
@@ -107,6 +137,25 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
           </li>)}</ol></div>
         </details>
       </>}
+      <details onToggle={event => setMixedOpen(event.currentTarget.open)}><summary>选择截图／笔记与聊天来源，预览混合检索</summary>
+        {mixedOpen && <>
+          <p className="muted">只检索下方明确勾选的整个来源批次；不会自动纳入生成。</p>
+          {committed && <label className="check"><input type="checkbox" checked={selectedChatSnapshot} disabled={disabled}
+            onChange={event => { setSelectedChatSnapshot(event.target.checked); setMixedHits(null); }} />当前聊天导入批次（全部会话）</label>}
+          {contentBatches.map((batch, index) => <label className="check" key={batch.batch_id}><input type="checkbox" checked={selectedContentBatches.includes(batch.batch_id)} disabled={disabled}
+            onChange={event => { setSelectedContentBatches(current => event.target.checked ? [...current, batch.batch_id] : current.filter(id => id !== batch.batch_id)); setMixedHits(null); }} />截图／笔记批次 {index + 1} · {batch.unit_count} 条正文</label>)}
+          {!contentBatches.length && <p>还没有已导入的截图或笔记。可在上方导入。</p>}
+          <label className="check"><input type="checkbox" checked={includeUnknownTime} disabled={disabled}
+            onChange={event => { setIncludeUnknownTime(event.target.checked); setMixedHits(null); }} />包含时间未知的聊天与笔记</label>
+          <button type="button" disabled={disabled || !topic.trim()} onClick={() => void searchMixedSources()}>预览勾选来源的相关正文</button>
+          {mixedError && <p role="alert">{mixedError}</p>}
+          {mixedHits && <details><summary>相关正文 {mixedHits.length} 条</summary><ol>{mixedHits.map(hit => <li key={hit.unit_id}>
+            <strong>{hit.source_kind === "note_passage" ? "笔记／网页" : "聊天消息"}</strong> · {hit.timestamp || "时间未知"}
+            <p>{hit.text}</p>
+          </li>)}</ol></details>}
+          <p className="muted">已导入，暂不可跨来源整理；后续会在生成前逐条确认并排除。</p>
+        </>}
+      </details>
     </section>
     <section className="panel" aria-label="关键词与整理方向"><h2>2. 关键词 / 整理方向</h2>
       <label>关键词<input value={topic} maxLength={512} disabled={disabled} placeholder="例如：腾讯音乐黑客松" onChange={event => setTopic(event.target.value)} /></label>

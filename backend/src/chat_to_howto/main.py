@@ -28,6 +28,7 @@ from chat_to_howto.api.generation import (
     create_generation_router,
 )
 from chat_to_howto.api.imports import create_imports_router
+from chat_to_howto.api.mixed_search import create_mixed_search_router
 from chat_to_howto.api.content_imports import create_content_imports_router
 from chat_to_howto.api.search import SelectionSearchRequest, create_search_router
 from chat_to_howto.api.session import digest, opaque
@@ -52,6 +53,7 @@ from chat_to_howto.services.importer import BatchImporter
 from chat_to_howto.services.import_sessions import ChatImportService
 from chat_to_howto.services.content_imports import ContentImportService
 from chat_to_howto.services.image_ocr import recognize_image
+from chat_to_howto.services.mixed_search import MixedSearchService
 from chat_to_howto.services.generation_cache import GenerationCacheSettings
 from chat_to_howto.services.generation_jobs import (
     GenerationAuthorizationError,
@@ -248,6 +250,7 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
         ocr=lambda image: recognize_image(image, executable=ocr_executable, timeout_seconds=20),
         preview_ttl_seconds=selection_ttl_seconds,
     )
+    mixed_search = MixedSearchService(chat_repository, ContentRepository(chat_repository))
     def default_generation_provider(_provider_name: str):
         raise ValueError("generation provider is not configured")
 
@@ -294,6 +297,7 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
     app.state.chat_search = chat_search
     app.state.chat_imports = chat_imports
     app.state.content_imports = content_imports
+    app.state.mixed_search = mixed_search
     app.state.generation_orchestrator = generation_orchestrator
     app.state.document_service = document_service
     app.state.document_export_service = document_export_service
@@ -868,6 +872,13 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
     app.include_router(
         create_content_imports_router(
             get_service=lambda: content_imports,
+            require_session=require_p1_session,
+            require_csrf=require_p1_csrf,
+        )
+    )
+    app.include_router(
+        create_mixed_search_router(
+            get_service=lambda: mixed_search,
             require_session=require_p1_session,
             require_csrf=require_p1_csrf,
         )

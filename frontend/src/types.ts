@@ -260,6 +260,17 @@ export interface ContentPreviewRequest {
   images?: { filename: string; payload_base64: string; input_order: number }[];
   pasted_note?: string;
 }
+export interface SourceRef { kind: "chat_snapshot" | "content_batch"; id: string }
+export interface MixedSearchRequest {
+  source_refs: SourceRef[]; include_undated: boolean;
+  start_time?: string | null; end_time?: string | null; terms: string[];
+}
+export interface MixedSearchHit {
+  unit_id: string; source_kind: ContentUnitKind; source_ref: SourceRef;
+  text: string; sender_name: string | null; timestamp: string | null;
+  source_order: number | null; image_id: string | null;
+}
+export interface MixedSearchPage { hits: MixedSearchHit[] }
 export function isTrustedRealReport(value: unknown, source: Source | undefined): boolean {
   if (!source || typeof value !== "object" || value === null) return false;
   const report = value as Record<string, unknown>;
