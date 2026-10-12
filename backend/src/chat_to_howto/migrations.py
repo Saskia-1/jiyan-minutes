@@ -1270,6 +1270,47 @@ _MIGRATION_11 = (
 )
 
 
+_MIGRATION_12 = (
+    """
+    CREATE TABLE content_batches (
+        batch_id TEXT PRIMARY KEY,
+        session_digest TEXT NOT NULL CHECK (length(session_digest) = 64),
+        created_at_utc TEXT NOT NULL,
+        unit_count INTEGER NOT NULL CHECK (unit_count > 0)
+    )
+    """,
+    """
+    CREATE TABLE content_images (
+        image_id TEXT PRIMARY KEY,
+        batch_id TEXT NOT NULL,
+        input_order INTEGER NOT NULL CHECK (input_order >= 0),
+        sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+        basename TEXT NOT NULL UNIQUE,
+        mime_type TEXT NOT NULL CHECK (mime_type IN ('image/png', 'image/jpeg')),
+        FOREIGN KEY (batch_id) REFERENCES content_batches(batch_id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE content_units (
+        unit_id TEXT PRIMARY KEY,
+        batch_id TEXT NOT NULL,
+        image_id TEXT,
+        kind TEXT NOT NULL CHECK (kind IN ('chat_message', 'note_passage')),
+        group_id TEXT NOT NULL,
+        source_order INTEGER NOT NULL CHECK (source_order >= 0),
+        text TEXT NOT NULL CHECK (length(text) > 0),
+        sender_name TEXT,
+        sent_at TEXT,
+        FOREIGN KEY (batch_id) REFERENCES content_batches(batch_id) ON DELETE CASCADE,
+        FOREIGN KEY (image_id) REFERENCES content_images(image_id)
+    )
+    """,
+    "CREATE INDEX idx_content_batches_session ON content_batches(session_digest, created_at_utc)",
+    "CREATE INDEX idx_content_units_batch_order ON content_units(batch_id, source_order)",
+    "CREATE INDEX idx_content_images_batch ON content_images(batch_id, input_order)",
+)
+
+
 MigrationAction = tuple[str, ...] | Callable[[sqlite3.Connection], None]
 MIGRATIONS: tuple[tuple[int, MigrationAction], ...] = (
     (1, _MIGRATION_1),
@@ -1283,6 +1324,7 @@ MIGRATIONS: tuple[tuple[int, MigrationAction], ...] = (
     (9, _MIGRATION_9),
     (10, _MIGRATION_10),
     (11, _MIGRATION_11),
+    (12, _MIGRATION_12),
 )
 
 

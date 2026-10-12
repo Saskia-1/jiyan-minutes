@@ -28,6 +28,7 @@ from chat_to_howto.api.generation import (
     create_generation_router,
 )
 from chat_to_howto.api.imports import create_imports_router
+from chat_to_howto.api.content_imports import create_content_imports_router
 from chat_to_howto.api.search import SelectionSearchRequest, create_search_router
 from chat_to_howto.api.session import digest, opaque
 from chat_to_howto.db import Database, P0_SCHEMA_VERSION
@@ -37,6 +38,7 @@ from chat_to_howto.domain.generation import GenerationBudget
 from chat_to_howto.domain.search import SearchRequest
 from chat_to_howto.environment import KNOWN_APPLICATION_PATHS, collect_environment
 from chat_to_howto.repositories.chat import ChatRepository, SnapshotRef
+from chat_to_howto.repositories.content import ContentRepository
 from chat_to_howto.services.artifacts import ApprovedOutputRoot, ArtifactWriter
 from chat_to_howto.services.documents import DocumentService
 from chat_to_howto.services.document_export import DocumentExportService
@@ -48,6 +50,8 @@ from chat_to_howto.services.export_jobs import (
 )
 from chat_to_howto.services.importer import BatchImporter
 from chat_to_howto.services.import_sessions import ChatImportService
+from chat_to_howto.services.content_imports import ContentImportService
+from chat_to_howto.services.image_ocr import recognize_image
 from chat_to_howto.services.generation_cache import GenerationCacheSettings
 from chat_to_howto.services.generation_jobs import (
     GenerationAuthorizationError,
@@ -236,6 +240,14 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
         preview_ttl_seconds=selection_ttl_seconds,
         selection_ttl_seconds=session_ttl_seconds,
     )
+    ocr_executable = Path(__file__).resolve().parents[3] / "backend/native/ocr/build/chat-image-ocr"
+    content_imports = ContentImportService(
+        repository=ContentRepository(chat_repository),
+        image_root=database.path.with_name(f"{database.path.stem}.content-images"),
+        clock=clock,
+        ocr=lambda image: recognize_image(image, executable=ocr_executable, timeout_seconds=20),
+        preview_ttl_seconds=selection_ttl_seconds,
+    )
     def default_generation_provider(_provider_name: str):
         raise ValueError("generation provider is not configured")
 
@@ -281,11 +293,13 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
     app.state.export_orchestrator = export_orchestrator
     app.state.chat_search = chat_search
     app.state.chat_imports = chat_imports
+    app.state.content_imports = content_imports
     app.state.generation_orchestrator = generation_orchestrator
     app.state.document_service = document_service
     app.state.document_export_service = document_export_service
     app.state.deletion_service = deletion_service
     app.router.add_event_handler("shutdown", chat_imports.close)
+    app.router.add_event_handler("shutdown", content_imports.close)
     app.router.add_event_handler("shutdown", chat_repository.close)
 
     def now(): return clock().astimezone(timezone.utc)
@@ -327,7 +341,7 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
             return error(401)
         if (
             request.method == "POST"
-            and request.url.path == "/api/imports/previews"
+            and request.url.path in {"/api/imports/previews", "/api/content-imports/previews"}
         ):
             content_length = request.headers.get("content-length")
             if content_length is not None:
@@ -847,6 +861,13 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
     app.include_router(
         create_imports_router(
             get_service=lambda: chat_imports,
+            require_session=require_p1_session,
+            require_csrf=require_p1_csrf,
+        )
+    )
+    app.include_router(
+        create_content_imports_router(
+            get_service=lambda: content_imports,
             require_session=require_p1_session,
             require_csrf=require_p1_csrf,
         )
