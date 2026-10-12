@@ -66,6 +66,7 @@ def _rejected(error: Exception) -> HTTPException:
     known = {
         "image_limit_exceeded", "note_limit_exceeded", "unsupported_image",
         "invalid_image_encoding", "image_order_invalid", "preview_capacity_exceeded",
+        "content_unit_limit_exceeded", "content_text_limit_exceeded",
     }
     return HTTPException(status_code=422, detail={"code": code if code in known else "invalid_content"})
 

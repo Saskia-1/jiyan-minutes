@@ -179,6 +179,8 @@ def test_oversized_image_and_invalid_metadata_rejected(service):
     unit = preview.units[0]
     with pytest.raises(ValueError):
         importer.revise_preview(preview.preview_id, (UnitEdit(unit_id=unit.unit_id, kind="note_passage", group_id="note-1", text="正文", sender_name="伪作者", sent_at=None, order=0),), session_id="owner")
+    with pytest.raises(ValueError, match="content_unit_limit_exceeded"):
+        importer.create_preview(images=None, pasted_note="x\n\n" * 2_001, session_id="owner")
 
 
 def test_image_order_and_groups_can_be_corrected_before_commit(service):

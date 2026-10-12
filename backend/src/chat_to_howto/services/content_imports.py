@@ -29,6 +29,8 @@ _MAX_IMAGE = 15 * 1024 * 1024
 _MAX_TOTAL = 64 * 1024 * 1024
 _MAX_NOTE = 1024 * 1024
 _MAX_PIXELS = 40_000_000
+_MAX_UNITS = 2_000
+_MAX_CONFIRMED_TEXT = 2 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +154,8 @@ class ContentImportService:
             if len(pasted_note.encode("utf-8")) > _MAX_NOTE:
                 raise ValueError("note_limit_exceeded")
             paragraphs = [part.strip() for part in re.split(r"\n\s*\n", pasted_note) if part.strip()]
+            if len(paragraphs) > _MAX_UNITS:
+                raise ValueError("content_unit_limit_exceeded")
             for index, text in enumerate(paragraphs):
                 units.append(PreviewUnit(unit_id=f"candidate-{index}", kind="note_passage", group_id="note-1", text=text, order=index))
             if not units:
@@ -191,6 +195,8 @@ class ContentImportService:
                         group_id=ref, text=line.text.strip(), order=len(units), image_ref=ref,
                     ))
             suggested = next(iter(kinds)) if len(kinds) == 1 else "uncertain"
+            if len(units) > _MAX_UNITS:
+                raise ValueError("content_unit_limit_exceeded")
             if not units and status == "ready":
                 status = "empty_body"
             elif units and suggested == "uncertain" and status == "ready":
@@ -249,6 +255,8 @@ class ContentImportService:
                     text=edit.text.strip(), sender_name=edit.sender_name,
                     sent_at=edit.sent_at, order=edit.order, image_ref=old.image_ref,
                 ))
+            if sum(len(unit.text.encode("utf-8")) for unit in units) > _MAX_CONFIRMED_TEXT:
+                raise ValueError("content_text_limit_exceeded")
             images = pending.view.images
             candidates = pending.images
             if image_orders is not None:
