@@ -7,6 +7,8 @@ import {
   deletionCountKeys, type DeletionCountKey, type DeletionPlan, type DeletionResult,
   type DocumentArtifact, type DocumentRecoveryPage, type DocumentVersion, type HowToDocument, type HowToResult, type ValidatedEvidence, type ValidatedGeneration,
   type ImportCommit, type ImportPreview, type ImportPreviewRequest, type ImportRecoveryPage,
+  type ContentBatch, type ContentBatchPage, type ContentPreview, type ContentPreviewRequest,
+  type ContentUnitEdit,
 } from "../types";
 
 export class ApiError extends Error {
@@ -576,6 +578,50 @@ function parseImportRecoveryPage(value: unknown): ImportRecoveryPage {
   if (new Set(imports.map(item => item.import_id)).size !== imports.length) return invalid();
   return { imports, next_cursor };
 }
+function parseContentPreview(value: unknown): ContentPreview {
+  if (!isObject(value) || !Array.isArray(value.units) || !Array.isArray(value.images)) return invalid();
+  exactPublicFields(value, ["preview_id", "preview_fingerprint", "suggested_kind", "status", "units", "images", "warnings", "expires_at_utc"]);
+  const integer = (item: unknown) => Number.isInteger(item) && Number(item) >= 0 ? Number(item) : invalid();
+  const units = value.units.map(item => {
+    if (!isObject(item)) return invalid();
+    exactPublicFields(item, ["unit_id", "kind", "group_id", "text", "sender_name", "sent_at", "order", "image_ref"]);
+    return { unit_id: requiredString(item.unit_id), kind: member(["chat_message", "note_passage"] as const, item.kind),
+      group_id: requiredString(item.group_id), text: requiredString(item.text), sender_name: nullableString(item.sender_name),
+      sent_at: item.sent_at === null ? null : expiresAt(item.sent_at), order: integer(item.order), image_ref: nullableString(item.image_ref) };
+  });
+  const images = value.images.map(item => {
+    if (!isObject(item)) return invalid();
+    exactPublicFields(item, ["image_ref", "filename", "input_order", "sha256"]);
+    return { image_ref: requiredString(item.image_ref), filename: requiredString(item.filename),
+      input_order: integer(item.input_order), sha256: disclosureHash(item.sha256) };
+  });
+  if (new Set(units.map(item => item.unit_id)).size !== units.length || new Set(images.map(item => item.image_ref)).size !== images.length) return invalid();
+  return { preview_id: requiredString(value.preview_id), preview_fingerprint: disclosureHash(value.preview_fingerprint),
+    suggested_kind: member(["chat", "note", "uncertain"] as const, value.suggested_kind),
+    status: member(["ready", "empty_body", "boundary_uncertain", "ocr_unavailable"] as const, value.status),
+    units, images, warnings: plainStrings(value.warnings), expires_at_utc: expiresAt(value.expires_at_utc) };
+}
+function parseContentBatch(value: unknown): ContentBatch {
+  if (!isObject(value) || !Array.isArray(value.images)) return invalid();
+  exactPublicFields(value, ["batch_id", "unit_count", "image_count", "images", "created_at_utc"]);
+  const integer = (item: unknown) => Number.isInteger(item) && Number(item) >= 0 ? Number(item) : invalid();
+  const images = value.images.map(item => {
+    if (!isObject(item)) return invalid();
+    exactPublicFields(item, ["image_id", "input_order", "sha256"]);
+    return { image_id: requiredString(item.image_id), input_order: integer(item.input_order), sha256: disclosureHash(item.sha256) };
+  });
+  const image_count = integer(value.image_count);
+  if (images.length !== image_count) return invalid();
+  return { batch_id: requiredString(value.batch_id), unit_count: integer(value.unit_count), image_count,
+    images, created_at_utc: expiresAt(value.created_at_utc) };
+}
+function parseContentBatchPage(value: unknown): ContentBatchPage {
+  if (!isObject(value) || !Array.isArray(value.items)) return invalid();
+  exactPublicFields(value, ["items", "next_cursor"]);
+  const items = value.items.map(parseContentBatch);
+  if (new Set(items.map(item => item.batch_id)).size !== items.length) return invalid();
+  return { items, next_cursor: value.next_cursor === null ? null : requiredString(value.next_cursor) };
+}
 function validExportSelection(value: ExportSelection): boolean {
   return sourceIds.includes(value.source_id) && !!value.account_id.trim() && !!value.output_root_id.trim() &&
     validTimezone(value.display_timezone) && value.conversation_selection_ids.length > 0 && value.conversation_selection_ids.length <= 50 &&
@@ -621,7 +667,7 @@ export function createClient() {
       if (session === pending) session = undefined;
     }
   }
-  async function request<T>(path: string, parser: Parser<T>, body?: unknown, retryGet = true, csrfForGet = false): Promise<T> {
+  async function request<T>(path: string, parser: Parser<T>, body?: unknown, retryGet = true, csrfForGet = false, mutationMethod: "POST" | "PATCH" = "POST"): Promise<T> {
     checkedPath(path);
     try {
       const lease = await bootstrap();
@@ -632,7 +678,7 @@ export function createClient() {
       if (body !== undefined) {
         headers.set("Content-Type", "application/json");
       }
-      const response = await fetch(path, { method: body === undefined ? "GET" : "POST", headers,
+      const response = await fetch(path, { method: body === undefined ? "GET" : mutationMethod, headers,
         credentials: "same-origin", cache: "no-store", redirect: "error", ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
       if (response.status === 401) {
         if (lease.generation === latestGeneration) session = undefined;
@@ -748,6 +794,40 @@ export function createClient() {
       if ((cursor !== null && !/^[A-Za-z0-9_-]{1,256}$/.test(cursor)) ||
           !Number.isInteger(limit) || limit < 1 || limit > 50) return Promise.reject(new ApiError(0));
       return request("/api/imports/recovery", parseImportRecoveryPage, { cursor, limit });
+    },
+    previewContentImport: (value: ContentPreviewRequest) => {
+      const images = value.images;
+      const hasImages = Array.isArray(images) && images.length > 0 && images.length <= 20 && value.pasted_note === undefined &&
+        images.every(item => !!item.filename && !!item.payload_base64 && Number.isInteger(item.input_order) && item.input_order >= 0);
+      const hasNote = typeof value.pasted_note === "string" && !!value.pasted_note.trim() && images === undefined;
+      if (!hasImages && !hasNote) return Promise.reject(new ApiError(0));
+      return request("/api/content-imports/previews", parseContentPreview, value);
+    },
+    reviseContentPreview: (preview_id: string, edits: ContentUnitEdit[], image_orders: { image_ref: string; input_order: number }[] = []) => {
+      if (!/^[a-f0-9]{32}$/.test(preview_id) || !Array.isArray(edits) || edits.length > 10_000) return Promise.reject(new ApiError(0));
+      return request(`/api/content-imports/previews/${encodeURIComponent(preview_id)}`, parseContentPreview,
+        { edits, image_orders }, true, false, "PATCH");
+    },
+    commitContentPreview: (preview_id: string, preview_fingerprint: string) => {
+      if (!/^[a-f0-9]{32}$/.test(preview_id) || !/^[a-f0-9]{64}$/.test(preview_fingerprint)) return Promise.reject(new ApiError(0));
+      return request(`/api/content-imports/previews/${encodeURIComponent(preview_id)}/commit`, parseContentBatch,
+        { preview_fingerprint, confirmed: true });
+    },
+    recoverContentBatches: (cursor: string | null = null, limit = 20) => {
+      if ((cursor !== null && !/^[a-f0-9]{32}$/.test(cursor)) || !Number.isInteger(limit) || limit < 1 || limit > 50) return Promise.reject(new ApiError(0));
+      return request("/api/content-imports/recovery", parseContentBatchPage, { cursor, limit });
+    },
+    getContentImage: async (image_id: string): Promise<Blob> => {
+      if (!/^[a-f0-9]{32}$/.test(image_id)) throw new ApiError(0);
+      const lease = await bootstrap();
+      const response = await fetch(`/api/content-imports/images/${encodeURIComponent(image_id)}`, {
+        method: "GET", credentials: "same-origin", cache: "no-store", redirect: "error",
+        headers: { Accept: "image/png,image/jpeg", "X-CSRF-Token": lease.csrfToken },
+      });
+      if (!response.ok || !["image/png", "image/jpeg"].includes(response.headers.get("content-type") || "")) throw new ApiError(response.status);
+      const blob = await response.blob();
+      if (blob.size > 15 * 1024 * 1024) throw new ApiError(0);
+      return blob;
     },
     searchChats: (search: ChatSearchRequest) => {
       const validSource = sourceIds.includes(search.source_id as SourceId) || search.source_id === "manual";

@@ -7,6 +7,7 @@ import { ChatSearchPanel } from "../search/ChatSearchPanel";
 import { DeletionControl } from "../data/DeletionControl";
 import { DocumentLibrary } from "../documents/DocumentLibrary";
 import { ImportedChatWorkspace } from "./ImportedChatWorkspace";
+import { ContentImportPanel } from "./ContentImportPanel";
 
 const mappingFields = [
   ["conversation_id", "会话 ID"], ["conversation_name", "会话名称"],
@@ -65,6 +66,7 @@ export function ChatImportPanel({ api, outputRootId, compact = false }: { api: L
   const [historyError, setHistoryError] = useState("");
   const [busy, setBusy] = useState(false);
   const [generationScopeLocked, setGenerationScopeLocked] = useState(false);
+  const [showContentPanel, setShowContentPanel] = useState(false);
   const [error, setError] = useState("");
   const conversations = useMemo(() => committed ? importedConversations(committed) : [], [committed]);
   const importLocked = busy || generationScopeLocked;
@@ -162,6 +164,10 @@ export function ChatImportPanel({ api, outputRootId, compact = false }: { api: L
   const HistoryContainer = compact ? "details" : "section";
   const importControls = <>
     {!compact && <h2>导入聊天记录</h2>}
+    <details onToggle={event => setShowContentPanel(event.currentTarget.open)}>
+      <summary>截图 OCR / 笔记文字导入</summary>
+      {showContentPanel && <ContentImportPanel api={api} busy={importLocked} onCommitted={() => undefined} />}
+    </details>
     <p className="muted">支持 TXT、JSON、JSONL、CSV、XLSX、单文件 ZIP，也可以直接粘贴聊天。</p>
     <div className="import-origin" role="radiogroup" aria-label="导入方式">
       <label className="check"><input type="radio" name="import-origin" checked={origin === "imported_file"} disabled={importLocked}

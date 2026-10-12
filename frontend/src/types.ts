@@ -238,6 +238,28 @@ export interface ImportCommit {
   analysis?: ImportPreview["analysis"];
 }
 export interface ImportRecoveryPage { imports: ImportCommit[]; next_cursor: string | null }
+
+export type ContentUnitKind = "chat_message" | "note_passage";
+export interface ContentUnitEdit {
+  unit_id: string; kind: ContentUnitKind; group_id: string; text: string;
+  sender_name: string | null; sent_at: string | null; order: number;
+}
+export interface ContentPreviewUnit extends ContentUnitEdit { image_ref: string | null }
+export interface ContentPreviewImage { image_ref: string; filename: string; input_order: number; sha256: string }
+export interface ContentPreview {
+  preview_id: string; preview_fingerprint: string; suggested_kind: "chat" | "note" | "uncertain";
+  status: "ready" | "empty_body" | "boundary_uncertain" | "ocr_unavailable";
+  units: ContentPreviewUnit[]; images: ContentPreviewImage[]; warnings: string[]; expires_at_utc: string;
+}
+export interface ContentBatch {
+  batch_id: string; unit_count: number; image_count: number;
+  images: { image_id: string; input_order: number; sha256: string }[]; created_at_utc: string;
+}
+export interface ContentBatchPage { items: ContentBatch[]; next_cursor: string | null }
+export interface ContentPreviewRequest {
+  images?: { filename: string; payload_base64: string; input_order: number }[];
+  pasted_note?: string;
+}
 export function isTrustedRealReport(value: unknown, source: Source | undefined): boolean {
   if (!source || typeof value !== "object" || value === null) return false;
   const report = value as Record<string, unknown>;

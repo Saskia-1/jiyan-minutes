@@ -30,6 +30,20 @@ const committed = {
 };
 const emptyRecovery = { imports: [], next_cursor: null };
 
+it("现有聊天入口保留，并可展开本机截图／笔记导入", async () => {
+  const api = {
+    recoverImports: vi.fn().mockResolvedValue(emptyRecovery),
+    recoverContentBatches: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
+  } as unknown as LocalApiClient;
+  const { ChatImportPanel } = await import("./ChatImportPanel");
+  const user = userEvent.setup();
+  render(<ChatImportPanel api={api} outputRootId="fixture-root" />);
+  expect(screen.getByLabelText("聊天记录文件")).toBeVisible();
+  await user.click(screen.getByText("截图 OCR / 笔记文字导入"));
+  expect(await screen.findByLabelText("聊天或笔记截图")).toBeVisible();
+  expect(screen.getByLabelText("聊天记录文件")).toBeVisible();
+});
+
 it("简洁导入无时间聊天默认折叠，展开排除后只整理剩余消息", async () => {
   const rows = ["收藏歌单", "无关消息"].map((text, index) => ({
     message_id: `message:${index}`, conversation_id: "c", timestamp: null, source_order: index + 1,

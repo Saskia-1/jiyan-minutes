@@ -54,6 +54,31 @@ it("文档下载绑定同源 CSRF，401 后仅在下次明确下载时恢复会�
   expect(sessions).toBe(2);
 });
 
+it("截图与笔记客户端按严格契约发送预览和 PATCH 校对，不接受额外响应字段", async () => {
+  const id = "a".repeat(32);
+  const unit = { unit_id: "candidate-0", kind: "note_passage", group_id: "note-1", text: "正文",
+    sender_name: null, sent_at: null, order: 0, image_ref: null };
+  const preview = { preview_id: id, preview_fingerprint: "f".repeat(64), suggested_kind: "note", status: "ready",
+    units: [unit], images: [], warnings: [], expires_at_utc: "2099-01-01T00:00:00Z" };
+  const requests: Request[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = asRequest(input, init); requests.push(request.clone());
+    const path = new URL(request.url).pathname;
+    if (path === "/api/session") return json({ csrf_token: "csrf-1", expires_at: "2099-01-01T00:00:00Z" });
+    if (path === "/api/content-imports/previews") return json(preview, 201);
+    if (path === `/api/content-imports/previews/${id}`) return json({ ...preview, preview_fingerprint: "e".repeat(64) });
+    if (path === "/api/content-imports/recovery") return json({ items: [], next_cursor: null, unexpected: "not allowed" });
+    throw new Error(`unexpected_route_${path}`);
+  }));
+  const client = createClient();
+  expect((await client.previewContentImport({ pasted_note: "正文" })).units[0].text).toBe("正文");
+  expect((await client.reviseContentPreview(id, [{ unit_id: unit.unit_id, kind: "note_passage", group_id: unit.group_id,
+    text: unit.text, sender_name: null, sent_at: null, order: 0 }], [])).preview_fingerprint).toBe("e".repeat(64));
+  await expect(client.recoverContentBatches()).rejects.toBeInstanceOf(ApiError);
+  expect(requests[2].method).toBe("PATCH");
+  expect(requests[2].headers.get("X-CSRF-Token")).toBe("csrf-1");
+});
+
 it("所有并发保护 GET 先共享一次 session bootstrap", async () => {
   const paths: string[] = [];
   let bootstrapped = false;
