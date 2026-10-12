@@ -37,4 +37,5 @@ __pycache__/
 backend/.venv/
 frontend/node_modules/
 frontend/dist/
+backend/native/ocr/build/
 third_party_state/
