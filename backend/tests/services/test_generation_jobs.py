@@ -627,6 +627,36 @@ def test_daily_request_limit_blocks_retry_before_a_second_provider_call(tmp_path
         repository.close()
 
 
+def test_planning_and_generation_share_daily_request_limit_in_both_directions(tmp_path) -> None:
+    from chat_to_howto.services.ai_agent_planning import AIAgentPlanningService, AgentPlanningDailyLimit
+    repository, _ = _repository_with_snapshot(tmp_path)
+    provider = FakeProvider()
+    orchestrator = GenerationJobOrchestrator(repository=repository, provider_factory=lambda _: provider,
+        cache_settings=_cache_settings(), clock=lambda: NOW, max_daily_provider_requests=1)
+    planner = AIAgentPlanningService(repository=repository, provider_factory=lambda _: provider,
+        provider="fake", model="fixture-model", clock=lambda: NOW, max_daily_provider_requests=1)
+    try:
+        preview = planner.create_preview("整理创业想法", session_id="session-a")
+        planner.execute_authorized(preview.preview_id, preview_fingerprint=preview.preview_fingerprint,
+            confirmed=True, session_id="session-a")
+        _, _, job = _start(orchestrator)
+        assert orchestrator.run_job(job.job_id).error_code == "daily_usage_limit"
+        assert provider.call_count == 1
+        next_day = NOW + timedelta(days=1)
+        planner._clock = lambda: next_day
+        orchestrator._clock = lambda: next_day
+        pending = orchestrator.retry_job(job.job_id, session_id="session-a")
+        assert orchestrator.run_job(pending.job_id).state == "complete"
+        assert provider.call_count == 2
+        preview = planner.create_preview("整理创业想法", session_id="session-a")
+        with pytest.raises(AgentPlanningDailyLimit):
+            planner.execute_authorized(preview.preview_id,
+                preview_fingerprint=preview.preview_fingerprint, confirmed=True, session_id="session-a")
+        assert provider.call_count == 2
+    finally:
+        repository.close()
+
+
 def test_restart_reconciliation_leaves_no_nonterminal_generation_job(tmp_path) -> None:
     repository, _ = _repository_with_snapshot(tmp_path)
     orchestrator = _orchestrator(repository, FakeProvider())

@@ -1387,6 +1387,21 @@ def _complete_retention_structures(connection: sqlite3.Connection) -> None:
     )""")
 
 
+_MIGRATION_17 = (
+    """CREATE TABLE chat_agent_plan_requests (
+        request_record_id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('started', 'completed', 'failed', 'cancelled')),
+        created_at_utc TEXT NOT NULL,
+        completed_at_utc TEXT,
+        prompt_tokens INTEGER CHECK (prompt_tokens IS NULL OR prompt_tokens >= 0),
+        completion_tokens INTEGER CHECK (completion_tokens IS NULL OR completion_tokens >= 0)
+    )""",
+    "CREATE INDEX idx_chat_agent_plan_requests_created ON chat_agent_plan_requests(created_at_utc)",
+)
+
+
 MigrationAction = tuple[str, ...] | Callable[[sqlite3.Connection], None]
 MIGRATIONS: tuple[tuple[int, MigrationAction], ...] = (
     (1, _MIGRATION_1),
@@ -1405,6 +1420,7 @@ MIGRATIONS: tuple[tuple[int, MigrationAction], ...] = (
     (14, _MIGRATION_14),
     (15, _MIGRATION_15),
     (16, _complete_retention_structures),
+    (17, _MIGRATION_17),
 )
 
 

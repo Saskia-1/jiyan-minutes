@@ -70,6 +70,7 @@ from chat_to_howto.services.generation_prompts import PROMPT_VERSION
 from chat_to_howto.services.p0_verifier import P0Verifier
 from chat_to_howto.services.search import ChatSearchService
 from chat_to_howto.services.topic_expansion import TopicExpansionService
+from chat_to_howto.services.ai_agent_planning import AIAgentPlanningService
 
 
 _DISCLOSURE_SECTIONS = (
@@ -286,6 +287,14 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
         provider=settings.llm_provider,
         model=settings.llm_model,
     )
+    ai_agent_planning_service = AIAgentPlanningService(
+        repository=chat_repository,
+        provider_factory=selected_generation_provider_factory,
+        provider=settings.llm_provider,
+        model=settings.llm_model,
+        clock=clock,
+        max_daily_provider_requests=settings.llm_daily_request_limit,
+    )
     generation_orchestrator.reconcile_interrupted()
     document_service = DocumentService(repository=chat_repository, clock=clock)
     document_export_service = DocumentExportService(
@@ -310,6 +319,7 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
     app.state.content_imports = content_imports
     app.state.mixed_search = mixed_search
     app.state.generation_orchestrator = generation_orchestrator
+    app.state.ai_agent_planning_service = ai_agent_planning_service
     app.state.document_service = document_service
     app.state.document_export_service = document_export_service
     app.state.deletion_service = deletion_service
@@ -907,6 +917,7 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
         create_agent_router(
             require_session=require_p1_session,
             require_csrf=require_p1_csrf,
+            get_ai_service=lambda: app.state.ai_agent_planning_service,
         )
     )
     app.include_router(

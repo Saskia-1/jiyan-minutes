@@ -3,8 +3,9 @@ import { readFile } from "node:fs/promises";
 
 test("正式 Agent 首页自然要求、修改撤销、取消零外发与同版本双 TXT", async ({ page }) => {
   test.setTimeout(90_000);
-  let starts = 0, expansions = 0;
+  let starts = 0, expansions = 0, plans = 0;
   page.on("request", request => { if (request.method() === "POST" && new URL(request.url()).pathname === "/api/generation/jobs") starts++;
+    if (new URL(request.url()).pathname === "/api/agent/plans/execute") plans++;
     if (new URL(request.url()).pathname.startsWith("/api/generation/topic-expansion")) expansions++; });
   await page.goto("/"); await expect(page.getByRole("heading", { name: "记言 · Minutes", exact: true })).toBeVisible();
   const chat = page.getByRole("region", { name: "聊天内容" });
@@ -14,14 +15,25 @@ test("正式 Agent 首页自然要求、修改撤销、取消零外发与同版�
   await chat.getByRole("checkbox", { name: /确认按此预览导入/ }).check();
   await chat.getByRole("button", { name: "确认导入本地索引" }).click();
   const task = page.getByRole("region", { name: "整理任务" });
-  const instruction = "整理创业的想法";
+  const instruction = "把大家聊的创业点子捋一捋，归纳下一步值得试的方向";
   await task.getByLabel("整理要求", { exact: true }).fill(instruction);
   await task.getByRole("button", { name: "理解并整理" }).click();
+  const planning = task.getByRole("region", { name: "AI 任务理解预览" });
+  await expect(planning.locator("pre")).toContainText(instruction);
+  await expect(planning.locator("pre")).not.toContainText("甲：");
+  await expect(planning.getByRole("button", { name: "授权并理解要求" })).toBeDisabled();
+  expect(plans).toBe(0); expect(starts).toBe(0);
+  await planning.getByRole("button", { name: "取消理解要求" }).click();
+  await expect(planning).toHaveCount(0); expect(plans).toBe(0);
+  await task.getByRole("button", { name: "理解并整理" }).click();
+  await planning.getByRole("checkbox", { name: "授权本次向外部 AI 发送上述整理要求" }).check();
+  await planning.getByRole("button", { name: "授权并理解要求" }).click();
   await expect(task.getByLabel("检索关键词", { exact: true })).toHaveValue("创业");
   await expect(task.getByLabel("任务整理方向")).toHaveValue("ideas");
+  await expect(task.getByLabel("AI 提取的目标", { exact: true })).toHaveValue("归纳创业讨论中的想法与可探索方向");
   let outbound = task.getByRole("region", { name: "AI 外发预览" });
   await expect(outbound.locator("pre").first()).toBeVisible(); await expect(outbound).toContainText(instruction);
-  expect(starts).toBe(0); expect(expansions).toBe(0);
+  expect(starts).toBe(0); expect(expansions).toBe(0); expect(plans).toBe(1);
   await outbound.getByRole("checkbox", { name: /授权本次向外部 AI/ }).check();
   await task.getByLabel("检索关键词", { exact: true }).fill("不存在的主题");
   await expect(outbound).toHaveCount(0);
@@ -47,7 +59,7 @@ test("正式 Agent 首页自然要求、修改撤销、取消零外发与同版�
     texts.push(await readFile((await download.path())!, "utf8"));
   }
   expect(versions).toHaveLength(2); expect(new Set(versions).size).toBe(1); expect(texts[0]).toContain("[证据1]"); expect(texts[1]).toContain("[证据1]");
-  expect(starts).toBe(1); expect(expansions).toBe(0);
+  expect(starts).toBe(1); expect(expansions).toBe(0); expect(plans).toBe(1);
 });
 
 test("新导入笔记在 Agent 主流程直接整理，刷新不自动纳入历史聊天", async ({ page }) => {
@@ -61,8 +73,12 @@ test("新导入笔记在 Agent 主流程直接整理，刷新不自动纳入历�
   await importer.getByRole("button", { name: "确认导入正文" }).click();
   const task = page.getByRole("region", { name: "整理任务" });
   await task.getByLabel("整理要求", { exact: true }).fill("整理关于阅读的观点");
-  const mixed = page.waitForRequest(request => new URL(request.url()).pathname === "/api/mixed-search");
   await task.getByRole("button", { name: "理解并整理" }).click();
+  const planning = task.getByRole("region", { name: "AI 任务理解预览" });
+  await expect(planning.locator("pre")).not.toContainText("为笔记记录出处");
+  const mixed = page.waitForRequest(request => new URL(request.url()).pathname === "/api/mixed-search");
+  await planning.getByRole("checkbox", { name: "授权本次向外部 AI 发送上述整理要求" }).check();
+  await planning.getByRole("button", { name: "授权并理解要求" }).click();
   await expect(task.getByLabel("检索关键词")).toHaveValue("阅读");
   expect((await mixed).postDataJSON().source_refs).toHaveLength(1);
   await expect(task.getByRole("region", { name: "AI 外发预览" })).toContainText("不同作者的观点");

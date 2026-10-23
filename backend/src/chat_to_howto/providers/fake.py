@@ -81,6 +81,17 @@ class FakeProvider:
     def _deterministic_result(request: ProviderRequest) -> str:
         try:
             payload = json.loads(request.payload)
+            if isinstance(payload, dict) and payload.get("operation") == "plan_agent":
+                # Synthetic contract fixtures, never a semantic-quality evaluation.
+                instruction = str(payload.get("instruction", ""))
+                subject = "创业" if "创业" in instruction else "阅读" if "阅读" in instruction else ""
+                return json.dumps({
+                    "goal": "归纳创业讨论中的想法与可探索方向" if subject == "创业" else "归纳阅读讨论中的观点" if subject else "请明确整理主题",
+                    "keywords": [subject] if subject else [],
+                    "summary_type": "ideas" if subject == "创业" else "viewpoints",
+                    "all_content": False, "needs_clarification": not bool(subject),
+                    "notices": ["合成规划契约样例，不代表真实模型理解质量。"],
+                }, ensure_ascii=False, sort_keys=True)
             if isinstance(payload, dict) and payload.get("operation") == "expand_topic":
                 topic = payload.get("topic")
                 terms = {

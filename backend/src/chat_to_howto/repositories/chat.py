@@ -1625,6 +1625,42 @@ class ChatRepository:
             raise ValueError("generation job does not exist")
         return dict(row)
 
+    def _daily_provider_request_count(self, day_start_utc: str, day_end_utc: str) -> int:
+        return int(self._connection.execute(
+            """SELECT
+                (SELECT COUNT(*) FROM chat_generation_requests WHERE created_at_utc >= ? AND created_at_utc < ?)
+                + (SELECT COUNT(*) FROM chat_agent_plan_requests WHERE created_at_utc >= ? AND created_at_utc < ?)
+            """, (day_start_utc, day_end_utc, day_start_utc, day_end_utc),
+        ).fetchone()[0])
+
+    def reserve_agent_plan_request(self, *, request_record_id: str, provider: str, model: str,
+        created_at_utc: str, day_start_utc: str, day_end_utc: str, daily_request_limit: int,
+    ) -> None:
+        """Reserve a body-free planning attempt under the same durable budget as generation."""
+        with self._transaction():
+            if self._daily_provider_request_count(day_start_utc, day_end_utc) >= daily_request_limit:
+                raise PermissionError("daily provider request limit reached")
+            self._connection.execute(
+                """INSERT INTO chat_agent_plan_requests(
+                    request_record_id, provider, model, status, created_at_utc
+                ) VALUES (?, ?, ?, 'started', ?)""",
+                (request_record_id, provider, model, created_at_utc),
+            )
+
+    def finish_agent_plan_request(self, request_record_id: str, *, status: str,
+        prompt_tokens: int | None, completion_tokens: int | None, completed_at_utc: str,
+    ) -> bool:
+        if status not in {"completed", "failed", "cancelled"}:
+            raise ValueError("unsupported agent request status")
+        with self._transaction():
+            changed = self._connection.execute(
+                """UPDATE chat_agent_plan_requests SET status = ?, prompt_tokens = ?,
+                    completion_tokens = ?, completed_at_utc = ?
+                    WHERE request_record_id = ? AND status = 'started'""",
+                (status, prompt_tokens, completion_tokens, completed_at_utc, request_record_id),
+            ).rowcount
+        return changed == 1
+
     def create_generation_request(
         self, *, request_record_id: str, job_id: str, provider: str, model: str,
         created_at_utc: str, day_start_utc: str, day_end_utc: str,
@@ -1636,13 +1672,7 @@ class ChatRepository:
             ).fetchone()
             if job is None or job["state"] != "generating":
                 raise ValueError("generation job cannot start a provider request")
-            used_today = int(self._connection.execute(
-                """
-                SELECT COUNT(*) FROM chat_generation_requests
-                WHERE created_at_utc >= ? AND created_at_utc < ?
-                """,
-                (day_start_utc, day_end_utc),
-            ).fetchone()[0])
+            used_today = self._daily_provider_request_count(day_start_utc, day_end_utc)
             if used_today >= daily_request_limit:
                 raise PermissionError("daily provider request limit reached")
             ordinal = int(self._connection.execute(

@@ -9,7 +9,7 @@ import {
   type ImportCommit, type ImportPreview, type ImportPreviewRequest, type ImportRecoveryPage,
   type ContentBatch, type ContentBatchPage, type ContentPreview, type ContentPreviewRequest,
   type ContentUnitEdit,
-  type MixedSearchPage, type MixedSearchRequest, type MixedGenerationRequest, type SourceRef, type AgentPlan, type DocumentTextPair,
+  type MixedSearchPage, type MixedSearchRequest, type MixedGenerationRequest, type SourceRef, type AgentPlan, type AgentPlanPreview, type DocumentTextPair,
 } from "../types";
 
 export class ApiError extends Error {
@@ -50,6 +50,31 @@ function parseStringList(value: unknown, allowEmpty = false): string[] {
 function disclosureHash(value: unknown): string {
   const result = requiredString(value);
   return /^[a-f0-9]{64}$/.test(result) ? result : invalid();
+}
+function parseAgentPlan(value: unknown, boundedAiResult = false): AgentPlan {
+  if (!isObject(value) || typeof value.all_content !== "boolean" || typeof value.needs_clarification !== "boolean") return invalid();
+  exactPublicFields(value, ["instruction", "goal", "keywords", "summary_type", "all_content", "needs_clarification", "notices"]);
+  const instruction = requiredString(value.instruction); const goal = requiredString(value.goal);
+  const keywords = parseStringList(value.keywords, true); const notices = parseStringList(value.notices, true);
+  if (boundedAiResult && (instruction.length > 8192 || goal.length > 512 || keywords.length > 10 || keywords.some(item => item.length > 64) ||
+      notices.length > 10 || notices.some(item => item.length > 512))) return invalid();
+  return { instruction, goal, keywords, notices, summary_type: member(["viewpoints", "ideas", "how_to", "mixed"] as const, value.summary_type),
+    all_content: value.all_content, needs_clarification: value.needs_clarification };
+}
+function parseAgentPlanPreview(value: unknown): AgentPlanPreview {
+  if (!isObject(value)) return invalid();
+  exactPublicFields(value, ["preview_id", "preview_fingerprint", "instruction", "outbound_text", "provider", "model", "expires_at_utc", "max_output_tokens"]);
+  const preview_id = requiredString(value.preview_id); const instruction = requiredString(value.instruction);
+  const outbound_text = requiredString(value.outbound_text);
+  if (!/^[a-f0-9]{32}$/.test(preview_id) || instruction.length > 8192 || !Number.isInteger(value.max_output_tokens) ||
+      Number(value.max_output_tokens) < 1 || Number(value.max_output_tokens) > 32768) return invalid();
+  let payload: unknown; try { payload = JSON.parse(outbound_text) as unknown; } catch { return invalid(); }
+  if (!isObject(payload)) return invalid();
+  exactPublicFields(payload, ["operation", "instruction"]);
+  if (payload.operation !== "plan_agent" || payload.instruction !== instruction) return invalid();
+  return { preview_id, preview_fingerprint: disclosureHash(value.preview_fingerprint), instruction, outbound_text,
+    provider: requiredString(value.provider), model: requiredString(value.model), expires_at_utc: expiresAt(value.expires_at_utc),
+    max_output_tokens: Number(value.max_output_tokens) };
 }
 function parseDisclosure(value: unknown): Disclosure {
   if (!isObject(value) || !isObject(value.sections) || !Array.isArray(value.blockers)) return invalid();
@@ -822,13 +847,19 @@ export function createClient() {
     },
     planAgent: (instruction: string) => {
       if (!instruction.trim() || instruction.length > 512) return Promise.reject(new ApiError(0));
-      return request("/api/agent/plans", (value: unknown): AgentPlan => {
-        if (!isObject(value) || typeof value.all_content !== "boolean" || typeof value.needs_clarification !== "boolean") return invalid();
-        exactPublicFields(value, ["instruction", "goal", "keywords", "summary_type", "all_content", "needs_clarification", "notices"]);
-        return { instruction: requiredString(value.instruction), goal: requiredString(value.goal),
-          keywords: parseStringList(value.keywords, true), summary_type: member(["viewpoints", "ideas", "how_to", "mixed"] as const, value.summary_type),
-          all_content: value.all_content, needs_clarification: value.needs_clarification, notices: parseStringList(value.notices, true) };
-      }, { instruction });
+      return request("/api/agent/plans", parseAgentPlan, { instruction });
+    },
+    previewAgentPlan: (instruction: string) => {
+      if (!instruction.trim() || instruction.length > 512) return Promise.reject(new ApiError(0));
+      return request("/api/agent/plan-previews", parseAgentPlanPreview, { instruction });
+    },
+    executeAgentPlan: (preview_id: string, preview_fingerprint: string) => {
+      if (!/^[a-f0-9]{32}$/.test(preview_id) || !/^[a-f0-9]{64}$/.test(preview_fingerprint)) return Promise.reject(new ApiError(0));
+      return request("/api/agent/plans/execute", value => parseAgentPlan(value, true), { preview_id, preview_fingerprint, confirmed: true });
+    },
+    cancelAgentPlan: (preview_id: string) => {
+      if (!/^[a-f0-9]{32}$/.test(preview_id)) return Promise.reject(new ApiError(0));
+      return request(`/api/agent/plan-previews/${encodeURIComponent(preview_id)}/cancel`, () => undefined, {});
     },
     documentTextPair: async (id: string, version_id: string): Promise<DocumentTextPair> => {
       if (![id, version_id].every(value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value))) throw new ApiError(0);

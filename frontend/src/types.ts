@@ -301,6 +301,10 @@ export function validTimezone(value: string): boolean {
   try { new Intl.DateTimeFormat("en", { timeZone: value }); return true; } catch { return false; }
 }
 
+export interface AgentPlanPreview {
+  preview_id: string; preview_fingerprint: string; instruction: string; outbound_text: string;
+  provider: string; model: string; expires_at_utc: string; max_output_tokens: number;
+}
 export interface AgentPlan {
   instruction: string; goal: string; keywords: string[]; summary_type: SummaryType;
   all_content: boolean; needs_clarification: boolean; notices: string[];

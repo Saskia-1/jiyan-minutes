@@ -86,6 +86,18 @@ def test_fake_provider_returns_stable_topic_expansion_without_chat_messages() ->
     }
 
 
+def test_fake_provider_ai_plan_is_a_contract_fixture_without_source_content() -> None:
+    request = _request(payload=json.dumps({"operation": "plan_agent", "instruction": "把大家聊的创业点子捋一捋，归纳下一步值得试的方向"}, ensure_ascii=False).encode())
+    response = _run(FakeProvider().generate(request, CancellationToken()))
+    result = json.loads(response.content)
+    assert result["keywords"] == ["创业"]
+    assert result["summary_type"] == "ideas"
+    assert result["goal"] == "归纳创业讨论中的想法与可探索方向"
+    assert result["all_content"] is False
+    assert result["needs_clarification"] is False
+    assert set(result) == {"goal", "keywords", "summary_type", "all_content", "needs_clarification", "notices"}
+
+
 def test_fake_provider_summary_is_stable_and_cites_the_supplied_message() -> None:
     request = _request(payload=json.dumps({
         "generation_kind": "summary", "topic": "就业",

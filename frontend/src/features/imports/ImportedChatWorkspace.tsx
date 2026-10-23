@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { LocalApiClient } from "../../api/client";
-import type { ChatSearchRequest, ChatSearchResult, ContentBatch, GenerationSelectionRequest, HowToDocument, ImportCommit, MixedSearchHit, SummaryType, AgentPlan } from "../../types";
+import { ApiError, type LocalApiClient } from "../../api/client";
+import type { ChatSearchRequest, ChatSearchResult, ContentBatch, GenerationSelectionRequest, HowToDocument, ImportCommit, MixedSearchHit, SummaryType, AgentPlan, AgentPlanPreview } from "../../types";
 import { GenerationPanel } from "../generation/GenerationPanel";
 import { DocumentEditor } from "../documents/DocumentEditor";
 import { DocumentLibrary } from "../documents/DocumentLibrary";
@@ -19,6 +19,11 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
   const [autoPrepareRevision, setAutoPrepareRevision] = useState<number>();
   const autoPrepareSequence = useRef(0);
   const [planning, setPlanning] = useState(false);
+  const [plannerMode, setPlannerMode] = useState<"ai" | "local">("ai");
+  const [planningPreview, setPlanningPreview] = useState<AgentPlanPreview | null>(null);
+  const [planningConfirmed, setPlanningConfirmed] = useState(false);
+  const planningActive = useRef(false);
+  const pendingPlan = useRef<{ preview: AgentPlanPreview; originalInstruction: string } | null>(null);
   const [keywordText, setKeywordText] = useState("");
   const [manualMode, setManualMode] = useState(false);
   const planningRevision = useRef(0);
@@ -59,21 +64,87 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
     setSelectedContentBatches(ids => [...new Set([...ids, latestContentBatch.batch_id])]);
     setIncludeUnknownTime(true); setRawUnavailable(false); onContentBatchConsumed?.();
   }, [latestContentBatch, onContentBatchConsumed]);
-  async function understand() {
-    if (!instruction.trim() || planning) return;
-    const revision = ++planningRevision.current; setPlanning(true); setPlan(null); setError("");
-    try {
-      const value = await api.planAgent(instruction);
-      if (revision !== planningRevision.current) return;
-      setPlan(value); setTopic(value.instruction); setKeywordText(value.keywords.join("、")); setDirection(value.summary_type);
-      if (!value.needs_clarification && (value.keywords.length || value.all_content)) setAutoPrepareRevision(++autoPrepareSequence.current);
-    } catch { if (revision === planningRevision.current) setError("暂时无法理解要求，请修改后重试；没有发送资料。"); }
-    finally { setPlanning(false); }
+  const discardPlanning = useCallback(() => {
+    planningRevision.current += 1; planningActive.current = false;
+    const pending = pendingPlan.current; pendingPlan.current = null;
+    setPlanning(false); setPlanningPreview(null); setPlanningConfirmed(false);
+    setPlan(null); setAutoPrepareRevision(undefined); setTopic(""); setNotice(""); setError("");
+    if (pending) void api.cancelAgentPlan(pending.preview.preview_id).catch(() => undefined);
+  }, [api]);
+  function acceptPlan(value: AgentPlan, originalInstruction: string) {
+    setPlan(value); setTopic(originalInstruction); setKeywordText(value.keywords.join("、")); setDirection(value.summary_type);
+    if (!value.needs_clarification && (value.keywords.length || value.all_content)) setAutoPrepareRevision(++autoPrepareSequence.current);
   }
-  const disabled = locked || importBusy || searchBusy || rawUnavailable;
+  function planningError(caught: unknown) {
+    if (caught instanceof ApiError && (caught.status === 429 || caught.code?.includes("limit")))
+      return "AI 任务理解未完成：已达到用量上限。请稍后重试，或明确选择本地规则（不联网）；没有发送资料正文。";
+    if (caught instanceof ApiError && ["provider_unconfigured", "provider_not_configured"].includes(caught.code || ""))
+      return "AI 任务理解未完成：尚未配置 AI 服务。可完成配置后重试，或明确选择本地规则（不联网）；没有发送资料正文。";
+    return "AI 任务理解未完成；请重新预览并授权重试，或明确选择本地规则（不联网）。没有发送资料正文。";
+  }
+  async function understand() {
+    if (!instruction.trim() || planningActive.current || pendingPlan.current || locked || importBusy || rawUnavailable) return;
+    discardPlanning();
+    const revision = ++planningRevision.current; const originalInstruction = instruction;
+    planningActive.current = true; setPlanning(true);
+    try {
+      if (plannerMode === "local") {
+        const value = await api.planAgent(originalInstruction);
+        if (revision === planningRevision.current) acceptPlan(value, originalInstruction);
+      } else {
+        const value = await api.previewAgentPlan(originalInstruction);
+        if (revision !== planningRevision.current) { void api.cancelAgentPlan(value.preview_id).catch(() => undefined); return; }
+        if (Date.parse(value.expires_at_utc) <= Date.now()) { void api.cancelAgentPlan(value.preview_id).catch(() => undefined); throw new Error("preview_expired"); }
+        pendingPlan.current = { preview: value, originalInstruction }; setPlanningPreview(value); setPlanningConfirmed(false);
+      }
+    } catch (caught) {
+      if (revision === planningRevision.current) setError(plannerMode === "ai" ? planningError(caught) : "本地规则未能理解要求，请修改后重试；没有发送资料正文。");
+    } finally {
+      if (revision === planningRevision.current) { planningActive.current = false; setPlanning(false); }
+    }
+  }
+  async function executePlanning() {
+    const pending = pendingPlan.current;
+    if (!pending || !planningConfirmed || planningActive.current || locked || importBusy || rawUnavailable) return;
+    if (Date.parse(pending.preview.expires_at_utc) <= Date.now()) { discardPlanning(); setError("AI 任务理解预览已过期，请重新预览并授权。"); return; }
+    const revision = ++planningRevision.current;
+    planningActive.current = true; setPlanning(true); setPlanningConfirmed(false); setError("");
+    try {
+      const value = await api.executeAgentPlan(pending.preview.preview_id, pending.preview.preview_fingerprint);
+      if (revision !== planningRevision.current) return;
+      if (value.instruction !== pending.preview.instruction) throw new Error("planning_instruction_mismatch");
+      pendingPlan.current = null; setPlanningPreview(null); acceptPlan(value, pending.originalInstruction);
+    } catch (caught) {
+      if (revision === planningRevision.current) {
+        pendingPlan.current = null; setPlanningPreview(null); setError(planningError(caught));
+        void api.cancelAgentPlan(pending.preview.preview_id).catch(() => undefined);
+      }
+    } finally {
+      if (revision === planningRevision.current) { planningActive.current = false; setPlanning(false); }
+    }
+  }
+  function cancelPlanning() {
+    const wasRunning = planningActive.current && !!pendingPlan.current;
+    discardPlanning(); setNotice(wasRunning ? "已停止后续处理；已发请求可能已产生费用。" : "已取消理解要求。");
+  }
+  const planningSourceKey = JSON.stringify([committed?.snapshot_id, selected, includeCurrentChat, selectedContentBatches, selectedChatSnapshot,
+    mixedOpen, start, end, includeUnknownTime, excluded, manualMode, plannerMode, rawEpoch]);
+  const planningSource = useRef(planningSourceKey);
+  useEffect(() => {
+    if (planningSource.current !== planningSourceKey) {
+      planningSource.current = planningSourceKey;
+      if (planningActive.current || pendingPlan.current) discardPlanning();
+    }
+  }, [planningSourceKey, discardPlanning]);
+  useEffect(() => () => {
+    planningRevision.current += 1; planningActive.current = false;
+    const pending = pendingPlan.current; pendingPlan.current = null;
+    if (pending) void api.cancelAgentPlan(pending.preview.preview_id).catch(() => undefined);
+  }, [api]);
+  const disabled = locked || importBusy || searchBusy || planning || rawUnavailable;
   useEffect(() => {
     const clear = () => {
-      planningRevision.current += 1; setPlan(null);
+      discardPlanning();
       rawRevision.current += 1; setRawEpoch(rawRevision.current); setRawUnavailable(true);
       setMessages([]); setCandidates(null); setMixedHits(null); setMixedSelectedIds([]);
       setContentBatches([]); setSelectedContentBatches([]); setSelectedChatSnapshot(false); setExcluded([]);
@@ -81,7 +152,7 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
     };
     window.addEventListener("minutes-raw-cleared", clear);
     return () => window.removeEventListener("minutes-raw-cleared", clear);
-  }, []);
+  }, [discardPlanning]);
   const request = useMemo<ChatSearchRequest | null>(() => {
     if (!committed || !selected.length) return null;
     const first = start ? utcInput(start, committed.display_timezone) : committed.range_start;
@@ -109,7 +180,9 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
     }).catch(() => { if (active) setMixedError("无法读取已导入的截图或笔记批次。"); });
     return () => { active = false; };
   }, [api, mixedOpen, rawEpoch]);
-  const updateLock = useCallback((value: boolean) => { setLocked(value); onScopeLockChange(value); }, [onScopeLockChange]);
+  const updateLock = useCallback((value: boolean) => { setLocked(value); }, []);
+  useEffect(() => { onScopeLockChange(locked || planning); }, [locked, planning, onScopeLockChange]);
+  useEffect(() => () => onScopeLockChange(false), [onScopeLockChange]);
   const complete = useCallback((id: string) => { setJobId(id); setOpenedDocument(null); }, []);
 
   function selection(ids: string[]): GenerationSelectionRequest {
@@ -267,15 +340,36 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
     </section>
     <section className="panel agent-composer" aria-label="整理任务"><h2>2. 交给记言整理</h2>
       {!manualMode && <>
+        <div className="choice-row" role="radiogroup" aria-label="任务理解方式">
+          <label className="check"><input type="radio" name="planner-mode" checked={plannerMode === "ai"} disabled={locked || importBusy || planning}
+            onChange={() => { discardPlanning(); setPlannerMode("ai"); }} />AI 理解（每次单独授权）</label>
+          <label className="check"><input type="radio" name="planner-mode" checked={plannerMode === "local"} disabled={locked || importBusy || planning}
+            onChange={() => { discardPlanning(); setPlannerMode("local"); }} />本地规则（不联网）</label>
+        </div>
         <label>整理要求<textarea className="agent-instruction" value={instruction} maxLength={512} disabled={locked || importBusy}
           placeholder="例如：整理这段聊天里有关创业的想法，列出各方观点和分歧"
-          onChange={event => { planningRevision.current += 1; setInstruction(event.target.value); setPlan(null); setAutoPrepareRevision(undefined); setTopic(""); setError(""); }} /></label>
-        <div className="actions"><button disabled={disabled || planning || !instruction.trim()} onClick={() => void understand()}>{planning ? "正在理解要求…" : "理解并整理"}</button>
-          <span className="muted">自动理解并筛选本机资料，外发前请你确认。</span></div>
+          onChange={event => { discardPlanning(); setInstruction(event.target.value); }} /></label>
+        <div className="actions"><button disabled={disabled || !!planningPreview || !instruction.trim()} onClick={() => void understand()}>{planning ? "正在理解要求…" : "理解并整理"}</button>
+          {!planningPreview && planning && <button type="button" onClick={cancelPlanning}>取消理解要求</button>}
+          <span className="muted">{plannerMode === "ai" ? "先预览并授权理解要求，筛选资料后另行确认正文外发。" : "本地规则只识别常见表达；请核对任务与检索词。"}</span></div>
+        {planningPreview && <section className="outbound-preview" aria-label="AI 任务理解预览">
+          <h3>等待授权 · 理解本次整理要求</h3>
+          <p>仅发送下方整理要求，不读取或附带已导入资料正文。正文生成需要另行预览与授权。</p>
+          <p>服务：{planningPreview.provider} · 模型：{planningPreview.model} · 最多 1 次调用 · 输出上限 {planningPreview.max_output_tokens} token</p>
+          <p>费用：未知（以服务实际账单为准） · 授权有效期：<time dateTime={planningPreview.expires_at_utc}>{new Date(planningPreview.expires_at_utc).toLocaleString("zh-CN")}</time></p>
+          <p>请核对将外发的完整脱敏要求；脱敏不能保证识别全部个人信息。</p><pre>{planningPreview.outbound_text}</pre>
+          <label className="check"><input type="checkbox" checked={planningConfirmed} disabled={planning}
+            onChange={event => setPlanningConfirmed(event.target.checked)} />授权本次向外部 AI 发送上述整理要求</label>
+          <div className="actions"><button type="button" onClick={cancelPlanning}>取消理解要求</button>
+            <button type="button" disabled={!planningConfirmed || planning} onClick={() => void executePlanning()}>授权并理解要求</button></div>
+          {planning && <p role="status">AI 正在理解要求…</p>}
+        </section>}
         {plan && <section className="agent-task-card" aria-label="任务理解结果">
-          <p className="agent-eyebrow">请核对这次任务</p><p>{plan.goal}</p>
+          <p className="agent-eyebrow">请核对这次任务 · {plannerMode === "ai" ? "AI 理解" : "本地规则"}</p>
+          <label>{plannerMode === "ai" ? "AI 提取的目标" : "本地识别目标"}<input value={plan.goal} readOnly /></label>
+          <p className="muted">需调整目标时，请修改下方完整要求。</p>
           {plan.notices.map((text, index) => <p className="warning" key={index}>{text}</p>)}
-          {plan.needs_clarification && <><p role="status">本地规则无法确定全部含义，请调整关键词和整理方向后继续。</p><button disabled={disabled} onClick={() => setPlan({ ...plan, needs_clarification: false })}>已核对以上任务</button></>}
+          {plan.needs_clarification && <><p role="status">{plannerMode === "ai" ? "AI 需要你补充或核对任务，请调整关键词和整理方向后继续。" : "本地规则无法确定全部含义，请调整关键词和整理方向后继续。"}</p><button disabled={disabled} onClick={() => setPlan({ ...plan, needs_clarification: false })}>已核对以上任务</button></>}
           <label>整理目标与完整要求<textarea value={topic} maxLength={512} disabled={disabled} onChange={event => setTopic(event.target.value)} /></label>
           <div className="fields"><label>检索关键词<input value={keywordText} maxLength={512} disabled={disabled} placeholder="用顿号分隔，例如：创业、就业" onChange={event => { setKeywordText(event.target.value); setPlan(value => value ? { ...value, needs_clarification: false } : value); }} /></label>
           <label>任务整理方向<select value={direction} disabled={disabled} onChange={event => { setDirection(event.target.value as SummaryType); setPlan(value => value ? { ...value, needs_clarification: false } : value); }}>
@@ -284,8 +378,8 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
           <p className="muted">{plan.all_content ? "要求包含全部内容：关键词留空时检索当前选中资料的全文。" : "只按以上关键词检索当前资料；没有匹配时不会生成。"}</p>
         </section>}
       </>}
-      <details onToggle={event => { if (!event.currentTarget.open && manualMode) { setManualMode(false); setTopic(plan?.instruction || ""); setAutoExpand(false); } }}><summary>高级设置 · 手动关键词流程</summary>
-        <label className="check"><input type="checkbox" checked={manualMode} disabled={disabled} onChange={event => { setManualMode(event.target.checked); setTopic(event.target.checked ? "" : plan?.instruction || ""); setAutoExpand(false); }} />使用手动关键词流程</label>
+      <details onToggle={event => { if (!event.currentTarget.open && manualMode) { setManualMode(false); setTopic(plan ? instruction : ""); setAutoExpand(false); } }}><summary>高级设置 · 手动关键词流程</summary>
+        <label className="check"><input type="checkbox" checked={manualMode} disabled={disabled} onChange={event => { setManualMode(event.target.checked); setTopic(event.target.checked ? "" : plan ? instruction : ""); setAutoExpand(false); }} />使用手动关键词流程</label>
       {manualMode && <section aria-label="关键词与整理方向">
       <label>关键词<input value={topic} maxLength={512} disabled={disabled} placeholder="例如：腾讯音乐黑客松" onChange={event => setTopic(event.target.value)} /></label>
       <label className="check"><input type="checkbox" checked={autoExpand} disabled={disabled} onChange={event => setAutoExpand(event.target.checked)} />自动扩展相关关键词（单独使用非思考请求，只发送主题，可能产生一次额外费用；不发送聊天正文；每次另行确认）</label>
@@ -302,7 +396,7 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
         prepareLabel={manualMode ? undefined : "重新预览外发内容"} showPrepareAction={manualMode || !!plan} sourceId="manual" account={committed?.account_id || ""}
         conversationSelectionIds={selected} conversationLabels={[]} excludedMessageIds={excluded} snapshotId={committed?.snapshot_id || null}
         rangeStart={request?.start_time || ""} rangeEnd={request?.end_time || ""} direction={direction} retrievalTopic={topic}
-        disabled={importBusy || searchBusy || rawUnavailable || (!!committed && (manualMode || includeCurrentChat) && !scopeLoaded) || (!manualMode && (!agentReady || (!mixedMode && !includeCurrentChat))) || (mixedMode ? (manualMode ? !mixedSelectedIds.length : !selectedContentBatches.length && !selectedChatSnapshot) : !request)} onScopeLockChange={updateLock}
+        disabled={importBusy || searchBusy || planning || rawUnavailable || (!!committed && (manualMode || includeCurrentChat) && !scopeLoaded) || (!manualMode && (!agentReady || (!mixedMode && !includeCurrentChat))) || (mixedMode ? (manualMode ? !mixedSelectedIds.length : !selectedContentBatches.length && !selectedChatSnapshot) : !request)} onScopeLockChange={updateLock}
         scopeRevision={JSON.stringify([includeCurrentChat, keywordText, manualMode, plan, rawEpoch, mixedMode, selectedChatSnapshot, selectedContentBatches, mixedHits?.map(hit => hit.unit_id), mixedSelectedIds, includeUnknownTime, start, end])}
         {...(mixedMode ? { preparePreview: manualMode ? prepareMixedPreview : prepareAgentMixedPreview } : { prepareSelection: prepare })} onComplete={complete} />
     </section>

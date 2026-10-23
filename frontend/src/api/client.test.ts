@@ -695,3 +695,81 @@ it("双TXT拒绝服务器返回不匹配版本或不安全文件名", async () =
   const api = createClient(); await expect(api.documentTextPair("document:a", "version:1")).rejects.toBeInstanceOf(ApiError);
   safe = true; await expect(api.documentTextPair("document:a", "version:1")).rejects.toBeInstanceOf(ApiError);
 });
+
+const planningPreview = { preview_id: "a".repeat(32), preview_fingerprint: "b".repeat(64), instruction: "整理创业观点",
+  outbound_text: JSON.stringify({ operation: "plan_agent", instruction: "整理创业观点" }), provider: "deepseek", model: "deepseek-chat",
+  expires_at_utc: "2099-01-01T00:00:00Z", max_output_tokens: 1200 };
+const plannedTask = { instruction: "整理创业观点", goal: "比较创业观点", keywords: ["创业"], summary_type: "viewpoints",
+  all_content: false, needs_clarification: false, notices: [] };
+it("AI规划只在独立确认后执行冻结预览，取消接受204且请求均绑定CSRF", async () => {
+  const calls: Request[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = asRequest(input, init); calls.push(request.clone());
+    const path = new URL(request.url).pathname;
+    if (path === "/api/session") return json({ csrf_token: "csrf-planner", expires_at: "2099-01-01T00:00:00Z" });
+    expect(request.headers.get("X-CSRF-Token")).toBe("csrf-planner");
+    if (path === "/api/agent/plan-previews") return json(planningPreview);
+    if (path.endsWith("/cancel")) return new Response(null, { status: 204 });
+    expect(path).toBe("/api/agent/plans/execute"); return json(plannedTask);
+  }));
+  const client = createClient(); const preview = await client.previewAgentPlan("整理创业观点");
+  expect(calls).toHaveLength(2);
+  expect(await client.executeAgentPlan(preview.preview_id, preview.preview_fingerprint)).toEqual(plannedTask);
+  await client.cancelAgentPlan(preview.preview_id);
+  expect(await calls[1].json()).toEqual({ instruction: "整理创业观点" });
+  expect(await calls[2].json()).toEqual({ preview_id: planningPreview.preview_id, preview_fingerprint: planningPreview.preview_fingerprint, confirmed: true });
+  expect(await calls[3].json()).toEqual({});
+});
+it.each([
+  { preview_id: "bad" }, { preview_fingerprint: "bad" }, { max_output_tokens: 0 }, { max_output_tokens: 1.5 },
+  { expires_at_utc: "invalid" }, { instruction: "" }, { model: "" }, { provider: "" }, { unknown: true },
+  { outbound_text: "not-json" }, { outbound_text: JSON.stringify({ operation: "generate", instruction: "整理创业观点" }) },
+  { outbound_text: JSON.stringify({ operation: "plan_agent", instruction: "别的要求" }) },
+  { outbound_text: JSON.stringify({ operation: "plan_agent", instruction: "整理创业观点", documents: [] }) },
+])("AI规划拒绝无效或不一致的外发预览 %j", async patch => {
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (new URL(asRequest(input, init).url).pathname === "/api/session") return json({ csrf_token: "csrf-planner", expires_at: "2099-01-01T00:00:00Z" });
+    return json({ ...planningPreview, ...patch });
+  }));
+  await expect(createClient().previewAgentPlan("整理创业观点")).rejects.toBeInstanceOf(ApiError);
+});
+it.each([{ keywords: Array.from({ length: 11 }, (_, i) => `词${i}`) }, { keywords: ["x".repeat(65)] },
+  { goal: "" }, { instruction: "" }, { summary_type: "invalid" }, { all_content: "yes" },
+  { needs_clarification: 0 }, { notices: [42] }, { extra: "secret" }])("AI规划拒绝畸形任务结果 %j", async patch => {
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (new URL(asRequest(input, init).url).pathname === "/api/session") return json({ csrf_token: "csrf-planner", expires_at: "2099-01-01T00:00:00Z" });
+    return json({ ...plannedTask, ...patch });
+  }));
+  await expect(createClient().executeAgentPlan(planningPreview.preview_id, planningPreview.preview_fingerprint)).rejects.toBeInstanceOf(ApiError);
+});
+it("AI规划拒绝无效调用参数且保留安全限额错误", async () => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (new URL(asRequest(input, init).url).pathname === "/api/session") return json({ csrf_token: "csrf-planner", expires_at: "2099-01-01T00:00:00Z" });
+    return json({ detail: { code: "daily_limit_exceeded", unsafe: "原始正文" } }, 429);
+  }); vi.stubGlobal("fetch", fetchMock); const client = createClient();
+  await expect(client.previewAgentPlan(" ")).rejects.toBeInstanceOf(ApiError);
+  await expect(client.executeAgentPlan("bad", planningPreview.preview_fingerprint)).rejects.toBeInstanceOf(ApiError);
+  await expect(client.cancelAgentPlan("bad")).rejects.toBeInstanceOf(ApiError);
+  expect(fetchMock).not.toHaveBeenCalled();
+  await expect(client.executeAgentPlan(planningPreview.preview_id, planningPreview.preview_fingerprint)).rejects.toMatchObject({ code: "daily_limit_exceeded", status: 429 });
+});
+it("脱敏占位符增长后的完整要求仍可安全展示和执行", async () => {
+  const instruction = "脱敏占位符".repeat(120);
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = new URL(asRequest(input, init).url).pathname;
+    if (path === "/api/session") return json({ csrf_token: "csrf-planner", expires_at: "2099-01-01T00:00:00Z" });
+    if (path === "/api/agent/plan-previews") return json({ ...planningPreview, instruction, outbound_text: JSON.stringify({ operation: "plan_agent", instruction }) });
+    return json({ ...plannedTask, instruction });
+  }));
+  const api = createClient(); expect((await api.previewAgentPlan("合成原始要求")).instruction).toBe(instruction);
+  expect((await api.executeAgentPlan(planningPreview.preview_id, planningPreview.preview_fingerprint)).instruction).toBe(instruction);
+});
+it("既有本地规则契约允许11个关键词，AI执行仍坚持10项上限", async () => {
+  const keywords = ["甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸", "子"];
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (new URL(asRequest(input, init).url).pathname === "/api/session") return json({ csrf_token: "csrf-local", expires_at: "2099-01-01T00:00:00Z" });
+    return json({ ...plannedTask, keywords });
+  }));
+  const api = createClient(); expect((await api.planAgent("关键词：甲、乙、丙、丁、戊、己、庚、辛、壬、癸、子")).keywords).toEqual(keywords);
+  await expect(api.executeAgentPlan(planningPreview.preview_id, planningPreview.preview_fingerprint)).rejects.toBeInstanceOf(ApiError);
+});
