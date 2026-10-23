@@ -254,7 +254,6 @@ class ChatImportService:
             analysis=analyzed.view,
             ready_to_commit=(
                 analyzed.view.parsed_count > 0
-                and analyzed.view.unresolved_count == 0
             ),
         )
 
@@ -265,6 +264,7 @@ class ChatImportService:
         preview_fingerprint: str,
         confirmed: bool,
         session_id: str,
+        accept_skipped: bool = False,
     ) -> ImportCommitView:
         if not confirmed or not session_id:
             raise ImportAuthorizationError("manual import confirmation is required")
@@ -283,7 +283,7 @@ class ChatImportService:
                 raise ImportAuthorizationError("manual import preview is unavailable")
             if (
                 pending.parsed_count == 0
-                or pending.unresolved_count != 0
+                or (pending.unresolved_count != 0 and accept_skipped is not True)
             ):
                 raise ImportNotReady("manual import has unresolved rows")
             analyzed = self._analyzer.analyze(
@@ -327,6 +327,9 @@ class ChatImportService:
                 import_id=str(record["import_id"]),
                 batch_id=str(record["batch_id"]),
                 snapshot_id=str(record["snapshot_id"]),
+                raw_expires_at_utc=datetime.fromisoformat(str(record["created_at_utc"])) + timedelta(days=7),
+                imported_count=analysis.parsed_count,
+                skipped_count=analysis.unresolved_count,
                 account_id=scope.account_id,
                 range_start=scope.range_start,
                 range_end=scope.range_end,
@@ -419,6 +422,9 @@ class ChatImportService:
             import_id=import_id,
             batch_id=batch_id,
             snapshot_id=snapshot_id,
+            raw_expires_at_utc=now + timedelta(days=7),
+            imported_count=len(messages),
+            skipped_count=analyzed.view.unresolved_count,
             account_id=account_id,
             range_start=range_start,
             range_end=range_end,

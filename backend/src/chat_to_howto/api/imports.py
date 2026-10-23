@@ -60,6 +60,7 @@ class CreateImportPreviewRequest(_Request):
 
 
 class CommitImportPreviewRequest(_Request):
+    accept_skipped: bool = False
     preview_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     confirmed: Literal[True]
 
@@ -164,6 +165,7 @@ def create_imports_router(
                 preview_id,
                 preview_fingerprint=request.preview_fingerprint,
                 confirmed=request.confirmed,
+                accept_skipped=request.accept_skipped,
                 session_id=session_id,
             )
         except ImportAuthorizationError:

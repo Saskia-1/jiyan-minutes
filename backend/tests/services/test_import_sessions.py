@@ -410,3 +410,41 @@ def test_multi_conversation_manifest_keeps_only_attributable_per_chat_counts(tmp
     assert all(item.duplicate_count is None for item in manifest.conversation_evidence)
     assert all(item.parse_error_count is None for item in manifest.conversation_evidence)
     repository.close()
+
+
+def test_partial_import_requires_separate_skip_consent_and_recovers_counts(tmp_path):
+    repository = ChatRepository(tmp_path / "partial.sqlite3")
+    service = ChatImportService(repository=repository, clock=Clock())
+    try:
+        preview = service.create_preview(filename="chat.csv",
+            payload=_payload() + b"project,not-a-time,B,unparsed synthetic row,m2\n",
+            origin="imported_file", platform_hint="qq", options=ImportOptions(), session_id="owner")
+        assert preview.ready_to_commit and preview.analysis.unresolved_count == 1
+        with pytest.raises(ImportNotReady):
+            service.commit_preview(preview.preview_id, preview_fingerprint=preview.preview_fingerprint,
+                confirmed=True, session_id="owner")
+        assert repository.message_count() == 0
+        committed = service.commit_preview(preview.preview_id, preview_fingerprint=preview.preview_fingerprint,
+            confirmed=True, accept_skipped=True, session_id="owner")
+        assert committed.imported_count == 1 and committed.skipped_count == 1
+        recovered = service.recover_committed(session_id="owner").imports[0]
+        assert (recovered.imported_count, recovered.skipped_count) == (1, 1)
+        assert recovered.raw_expires_at_utc == committed.raw_expires_at_utc
+    finally:
+        service.close(); repository.close()
+
+
+def test_skip_consent_cannot_commit_a_preview_without_valid_records(tmp_path):
+    repository = ChatRepository(tmp_path / "empty.sqlite3")
+    service = ChatImportService(repository=repository, clock=Clock())
+    try:
+        preview = service.create_preview(filename="chat.csv",
+            payload=b"conversation,time,sender,text,id\nproject,invalid,A,synthetic,m1\n",
+            origin="imported_file", platform_hint="qq", options=ImportOptions(), session_id="owner")
+        assert not preview.ready_to_commit
+        with pytest.raises(ImportNotReady):
+            service.commit_preview(preview.preview_id, preview_fingerprint=preview.preview_fingerprint,
+                confirmed=True, accept_skipped=True, session_id="owner")
+        assert repository.message_count() == 0
+    finally:
+        service.close(); repository.close()

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { LocalApiClient } from "../../api/client";
 import type { ChatSearchRequest, ChatSearchResult, ContentBatch, GenerationSelectionRequest, HowToDocument, ImportCommit, MixedSearchHit, SummaryType } from "../../types";
 import { GenerationPanel } from "../generation/GenerationPanel";
@@ -11,6 +11,9 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
   api: LocalApiClient; committed: ImportCommit | null; sourceControls: ReactNode; outputRootId: string;
   importBusy: boolean; onScopeLockChange: (locked: boolean) => void;
 }) {
+  const rawRevision = useRef(0);
+  const [rawEpoch, setRawEpoch] = useState(0);
+  const [rawUnavailable, setRawUnavailable] = useState(false);
   const [topic, setTopic] = useState("");
   const [direction, setDirection] = useState<SummaryType>("ideas");
   const [autoExpand, setAutoExpand] = useState(false);
@@ -36,7 +39,17 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
   const [mixedSelectedIds, setMixedSelectedIds] = useState<string[]>([]);
   const [mixedError, setMixedError] = useState("");
   const mixedMode = mixedOpen && (selectedChatSnapshot || selectedContentBatches.length > 0);
-  const disabled = locked || importBusy || searchBusy;
+  const disabled = locked || importBusy || searchBusy || rawUnavailable;
+  useEffect(() => {
+    const clear = () => {
+      rawRevision.current += 1; setRawEpoch(rawRevision.current); setRawUnavailable(true);
+      setMessages([]); setCandidates(null); setMixedHits(null); setMixedSelectedIds([]);
+      setContentBatches([]); setSelectedContentBatches([]); setSelectedChatSnapshot(false); setExcluded([]);
+      setOpenedDocument(value => value ? { ...value, source_evidence: [] } : value);
+    };
+    window.addEventListener("minutes-raw-cleared", clear);
+    return () => window.removeEventListener("minutes-raw-cleared", clear);
+  }, []);
   const request = useMemo<ChatSearchRequest | null>(() => {
     if (!committed || !selected.length) return null;
     const first = start ? utcInput(start, committed.display_timezone) : committed.range_start;
@@ -50,10 +63,10 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
     let active = true;
     setCandidates(null); setTerms([]); setMessages([]); setError("");
     if (request) void recallTopicMessages(api, request, [""]).then(value => {
-      if (active) setMessages(value.filter(item => item.snapshot_id === committed?.snapshot_id));
+      if (active) { setMessages(value.filter(item => item.snapshot_id === committed?.snapshot_id)); setRawUnavailable(false); }
     }).catch(() => { if (active) setError("聊天范围未能完整加载，请缩小范围或重新打开聊天。"); });
     return () => { active = false; };
-  }, [api, requestKey, committed?.snapshot_id]);
+  }, [api, requestKey, committed?.snapshot_id, rawEpoch]);
   useEffect(() => { setCandidates(null); setTerms([]); setNotice(""); }, [topic, autoExpand]);
   useEffect(() => { setMixedHits(null); setMixedSelectedIds([]); }, [topic, autoExpand, start, end, includeUnknownTime]);
   useEffect(() => {
@@ -63,7 +76,7 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
       if (active) setContentBatches(page.items);
     }).catch(() => { if (active) setMixedError("无法读取已导入的截图或笔记批次。"); });
     return () => { active = false; };
-  }, [api, mixedOpen]);
+  }, [api, mixedOpen, rawEpoch]);
   const updateLock = useCallback((value: boolean) => { setLocked(value); onScopeLockChange(value); }, [onScopeLockChange]);
   const complete = useCallback((id: string) => { setJobId(id); setOpenedDocument(null); }, []);
 
@@ -76,17 +89,19 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
   }
   async function recall(): Promise<ChatSearchResult[]> {
     if (!request || !committed || !topic.trim()) throw new Error("empty_scope");
+    const revision = rawRevision.current;
     setError(""); setNotice("");
-    let expanded = [topic.trim()];
+    let expanded = [...new Set([topic.trim(), ...topic.trim().split(/[、，,；;\n]+/).map(term => term.trim()).filter(Boolean)])].slice(0, 10);
     if (autoExpand) {
-      try { const result = await api.expandTopic(topic.trim()); expanded = result.terms;
-        if (result.degraded) setNotice("关键词扩展暂不可用，已使用原主题搜索。");
-      } catch { setNotice("关键词扩展暂不可用，已使用原主题搜索。"); }
+      try { const result = await api.expandTopic(topic.trim()); expanded = [...new Set([...expanded, ...result.terms])].slice(0, 10);
+        if (result.degraded) setNotice("关键词扩展暂不可用，已按原主题及输入的关键词进行本地搜索。");
+      } catch { setNotice("关键词扩展暂不可用，已按原主题及输入的关键词进行本地搜索。"); }
     }
     setTerms(expanded);
     const hits = (await recallTopicMessages(api, request, expanded)).filter(item => item.snapshot_id === committed.snapshot_id);
     if (!hits.length) { setCandidates([]); throw new Error("no_hits"); }
     const context = await api.previewGenerationContext(selection(hits.map(item => item.message_id)));
+    if (revision !== rawRevision.current) throw new Error("raw_scope_changed");
     setCandidates(context.messages); return context.messages;
   }
   async function prepare() {
@@ -97,6 +112,7 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
     } catch (caught) { setError("没有找到可整理的完整范围，请调整关键词、时间或排除项后重试。"); throw caught; }
   }
   async function searchMixedSources() {
+    const revision = rawRevision.current;
     setMixedError(""); setMixedHits(null); setMixedSelectedIds([]);
     const source_refs = [
       ...(selectedChatSnapshot && committed ? [{ kind: "chat_snapshot" as const, id: committed.snapshot_id }] : []),
@@ -106,11 +122,11 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
     setSearchBusy(true);
     try {
       if ((start && !end) || (end && !start)) throw new Error("incomplete_range");
-      let expanded = [topic.trim()];
+      let expanded = [...new Set([topic.trim(), ...topic.trim().split(/[、，,；;\n]+/).map(term => term.trim()).filter(Boolean)])].slice(0, 10);
       if (autoExpand) {
-        try { const value = await api.expandTopic(topic.trim()); expanded = value.terms;
-          if (value.degraded) setNotice("关键词扩展暂不可用，已使用原主题搜索。");
-        } catch { setNotice("关键词扩展暂不可用，已使用原主题搜索。"); }
+        try { const value = await api.expandTopic(topic.trim()); expanded = [...new Set([...expanded, ...value.terms])].slice(0, 10);
+          if (value.degraded) setNotice("关键词扩展暂不可用，已按原主题及输入的关键词进行本地搜索。");
+        } catch { setNotice("关键词扩展暂不可用，已按原主题及输入的关键词进行本地搜索。"); }
       }
       setTerms(expanded);
       const first = start ? utcInput(start, committed?.display_timezone || "Asia/Shanghai") : null;
@@ -118,7 +134,7 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
       if ((start && !first) || (end && !last) || (first && last && Date.parse(first) >= Date.parse(last))) throw new Error("invalid_range");
       const page = await api.searchMixed({ source_refs, include_undated: includeUnknownTime, terms: expanded,
         ...(first && last ? { start_time: first, end_time: last } : {}) });
-      setMixedHits(page.hits);
+      if (revision === rawRevision.current) setMixedHits(page.hits);
     } catch { setMixedError("混合检索失败；请检查来源、时间范围后重试。"); }
     finally { setSearchBusy(false); }
   }
@@ -147,7 +163,8 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
         <label className="check muted"><input type="radio" disabled />授权导入（即将支持）</label>
       </div>
       {committed ? <details><summary>导入其他聊天 / 管理已有聊天</summary>{sourceControls}</details> : sourceControls}
-      {committed && <><p>当前聊天：{committed.conversations.map(item => item.display_name || "未命名会话").join("、")}</p>
+      {rawUnavailable && <p role="status">原文已停用或清理，已有文档仍可编辑与下载。</p>}
+      {committed && <>{committed.imported_count !== undefined && <p role="status">本次导入 {committed.imported_count} 条有效记录，跳过 {committed.skipped_count ?? 0} 条未解析记录。</p>}<p>当前聊天：{committed.conversations.map(item => item.display_name || "未命名会话").join("、")}</p>
         <p>{analysis ? `${analysis.parsed_count} 条消息 · ${analysis.message_types.text} 条文本 · ${analysis.sender_count} 位发送者` : `已加载 ${messages.length} 条消息`}</p>
         <p className="muted">{analysis?.time_start ? `已知时间：${analysis.time_start} 至 ${analysis.time_end}` : "时间未知，保留原文件消息顺序。"}
           {!!messages.length && ` 当前范围 ${messages.filter(item => item.timestamp !== null).length} 条有时间，${messages.filter(item => item.timestamp === null).length} 条时间未知。`}</p>
@@ -190,7 +207,7 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
     </section>
     <section className="panel" aria-label="关键词与整理方向"><h2>2. 关键词 / 整理方向</h2>
       <label>关键词<input value={topic} maxLength={512} disabled={disabled} placeholder="例如：腾讯音乐黑客松" onChange={event => setTopic(event.target.value)} /></label>
-      <label className="check"><input type="checkbox" checked={autoExpand} disabled={disabled} onChange={event => setAutoExpand(event.target.checked)} />自动扩展相关关键词（单独使用非思考请求，只发送主题，可能产生一次额外费用；不发送聊天正文）</label>
+      <label className="check"><input type="checkbox" checked={autoExpand} disabled={disabled} onChange={event => setAutoExpand(event.target.checked)} />自动扩展相关关键词（单独使用非思考请求，只发送主题，可能产生一次额外费用；不发送聊天正文；每次另行确认）</label>
       <label>整理方向<select value={direction} disabled={disabled} onChange={event => setDirection(event.target.value as SummaryType)}>
         <option value="viewpoints">观点</option><option value="ideas">Idea / 想法</option><option value="how_to">方法论 / 怎么做</option><option value="mixed">综合整理</option>
       </select></label>
@@ -202,8 +219,8 @@ export function ImportedChatWorkspace({ api, committed, sourceControls, outputRo
       <GenerationPanel api={api} compact sourceId="manual" account={committed?.account_id || ""}
         conversationSelectionIds={selected} conversationLabels={[]} excludedMessageIds={excluded} snapshotId={committed?.snapshot_id || null}
         rangeStart={request?.start_time || ""} rangeEnd={request?.end_time || ""} direction={direction} retrievalTopic={topic}
-        disabled={importBusy || searchBusy || (mixedMode ? !mixedSelectedIds.length : !request)} onScopeLockChange={updateLock}
-        scopeRevision={JSON.stringify([mixedMode, selectedChatSnapshot, selectedContentBatches, mixedHits?.map(hit => hit.unit_id), mixedSelectedIds, includeUnknownTime, start, end])}
+        disabled={importBusy || searchBusy || rawUnavailable || (mixedMode ? !mixedSelectedIds.length : !request)} onScopeLockChange={updateLock}
+        scopeRevision={JSON.stringify([rawEpoch, mixedMode, selectedChatSnapshot, selectedContentBatches, mixedHits?.map(hit => hit.unit_id), mixedSelectedIds, includeUnknownTime, start, end])}
         {...(mixedMode ? { preparePreview: prepareMixedPreview } : { prepareSelection: prepare })} onComplete={complete} />
     </section>
     <DocumentEditor key={jobId || (openedDocument ? `${openedDocument.document_id}:${openedDocument.current_version.version_id}` : "empty")} compact api={api} generationJobId={jobId} initialDocument={openedDocument} />

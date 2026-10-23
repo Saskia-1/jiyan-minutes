@@ -182,6 +182,7 @@ export interface DocumentVersion {
   change_summary: string; created_at: string; content: HowToResult;
 }
 export interface HowToDocument {
+  source_deleted?: boolean;
   document_id: string; source_generation_job_id: string; source_snapshot_id: string | null; source_refs?: SourceRef[];
   created_at: string; updated_at: string; current_version: DocumentVersion;
   versions: DocumentVersion[]; source_evidence: ValidatedEvidence[];
@@ -200,7 +201,7 @@ export const deletionCountKeys = [
 export type DeletionCountKey = typeof deletionCountKeys[number];
 export interface DeletionPlan {
   plan_id: string; target_kind: "document" | "batch" | "content_batch"; target_id: string;
-  include_managed_files: boolean; fingerprint: string;
+  include_managed_files: boolean; preserve_documents?: boolean; fingerprint: string;
   counts: Record<DeletionCountKey, number>; effects: string[]; expires_at: string;
 }
 export interface DeletionResult {
@@ -238,6 +239,7 @@ export interface ImportCommit {
   range_start: string; range_end: string; display_timezone: string; warnings: string[];
   conversations: { conversation_selection_id: string; display_name: string | null; conversation_type: string | null }[];
   analysis?: ImportPreview["analysis"];
+  imported_count?: number; skipped_count?: number; raw_expires_at_utc?: string;
 }
 export interface ImportRecoveryPage { imports: ImportCommit[]; next_cursor: string | null }
 
@@ -255,7 +257,7 @@ export interface ContentPreview {
 }
 export interface ContentBatch {
   batch_id: string; unit_count: number; image_count: number;
-  images: { image_id: string; input_order: number; sha256: string }[]; created_at_utc: string;
+  images: { image_id: string; input_order: number; sha256: string }[]; created_at_utc: string; raw_expires_at_utc?: string;
 }
 export interface ContentBatchPage { items: ContentBatch[]; next_cursor: string | null }
 export interface ContentPreviewRequest {

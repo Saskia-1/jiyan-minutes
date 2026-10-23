@@ -1,4 +1,5 @@
-import { test, expect } from "@playwright/test";
+// Component integration harness: retained UI with the real synthetic backend.
+import { test, expect } from "./acknowledged-test";
 
 test("P4 粘贴导入进入现有搜索、排除、生成与文档链路", async ({ page }) => {
   const origin = "http://127.0.0.1:4173";
@@ -9,7 +10,7 @@ test("P4 粘贴导入进入现有搜索、排除、生成与文档链路", async
     return route.abort();
   });
 
-  await page.goto("/");
+  await page.goto("/e2e/component-harness.html");
   const importer = page.getByRole("region", { name: "导入聊天记录" });
   await importer.getByRole("radio", { name: "粘贴文本" }).check();
   await importer.getByRole("textbox", { name: "聊天文本" }).fill(
@@ -35,7 +36,7 @@ test("P4 粘贴导入进入现有搜索、排除、生成与文档链路", async
   await expect(results.getByRole("listitem")).toHaveCount(2);
   await results.getByRole("checkbox", { name: /不用于 AI 生成：应被排除/ }).check();
 
-  const generation = workspace.getByRole("region", { name: "AI 操作指南生成" });
+  const generation = workspace.getByRole("region", { name: "AI 主题整理" });
   await expect(generation).toContainText("排除：1 条消息");
   await generation.getByLabel("操作主题").fill("整理测试步骤");
   await generation.getByRole("button", { name: "预览 AI 外发" }).click();
@@ -54,7 +55,7 @@ test("P4 粘贴导入进入现有搜索、排除、生成与文档链路", async
   );
   const editor = generation.getByRole("region", { name: "文档编辑与历史" });
   await editor.getByRole("button", { name: "创建可编辑文档" }).click();
-  await expect(editor.getByLabel("文档标题")).toHaveValue("确定性测试操作指南");
+  await expect(editor.getByLabel("文档标题")).toHaveValue("确定性测试：整理测试步骤");
   await editor.getByLabel("文档标题").fill("刷新恢复测试 version 2");
   await editor.getByRole("button", { name: "保存为新版本" }).click();
   await expect(editor.getByText("版本 2")).toBeVisible();
@@ -82,11 +83,12 @@ test("P4 粘贴导入进入现有搜索、排除、生成与文档链路", async
   await newestDeletion.getByRole("button", { name: "确认删除" }).click();
   const olderDeletion = restoredImporter.getByRole("region", { name: "删除已导入批次 1" });
   await olderDeletion.getByRole("button", { name: "查看删除影响" }).click();
-  await expect(olderDeletion.getByLabel("删除影响清单")).toContainText("文档：1");
+  await expect(olderDeletion.getByLabel("删除影响清单")).toContainText("保留正文、全部版本");
   await olderDeletion.getByRole("checkbox", { name: /我已核对上述影响/ }).check();
   await olderDeletion.getByRole("button", { name: "确认删除" }).click();
   await expect(restoredImporter.getByRole("region", { name: "导入聊天的搜索与生成" })).toHaveCount(0);
 
+  await expect(library.getByLabel("文档标题")).toHaveValue("刷新恢复测试 version 2");
   expect(externalRequests).toHaveLength(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });

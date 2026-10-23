@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./acknowledged-test";
 import { readFile, stat } from "node:fs/promises";
 
 test("笔记从正式网页导入、逐条选择、隔离生成、证据、下载及刷新恢复", async ({ page }) => {

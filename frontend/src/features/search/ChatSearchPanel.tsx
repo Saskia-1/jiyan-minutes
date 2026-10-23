@@ -137,6 +137,7 @@ export function ChatSearchPanel(props: Props) {
   const [searchError, setSearchError] = useState("");
   const [searched, setSearched] = useState(false);
   const [generationScopeLocked, setGenerationScopeLocked] = useState(false);
+  const rawRevision = useRef(0);
   const lastSearch = useRef<ChatSearchRequest | null>(null);
   const alive = useRef(true);
   const reportGenerationScopeLock = useCallback((locked: boolean) => {
@@ -145,6 +146,15 @@ export function ChatSearchPanel(props: Props) {
   }, [props.onGenerationScopeLockChange]);
 
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  useEffect(() => {
+    const clear = () => {
+      rawRevision.current += 1; lastSearch.current = null;
+      setResults([]); setContextMessageIds([]); setExcludedMessageIds([]); setExportJob(null);
+      setCursor(null); setSearched(false); setConfirmed(false);
+    };
+    window.addEventListener("minutes-raw-cleared", clear);
+    return () => window.removeEventListener("minutes-raw-cleared", clear);
+  }, []);
   useEffect(() => {
     const available = new Set(props.conversations.map(item => item.conversation_selection_id));
     setSelected(current => current.filter(item => available.has(item)));
@@ -234,11 +244,12 @@ export function ChatSearchPanel(props: Props) {
   }
   async function search(searchRequest: ChatSearchRequest | null = request(null), append = false) {
     if (!searchRequest || searchBusy || props.disabled || generationScopeLocked) return;
+    const revision = rawRevision.current;
     lastSearch.current = searchRequest; setSearchBusy(true); setSearchError("");
     if (!append) { setResults([]); setContextMessageIds([]); setExcludedMessageIds([]); setCursor(null); setSearched(false); }
     try {
       const page = await props.api.searchChats(searchRequest);
-      if (!alive.current) return;
+      if (!alive.current || revision !== rawRevision.current) return;
       setResults(current => {
         const combined = append ? [...current, ...page.results] : page.results;
         return combined.filter((item, index) => combined.findIndex(candidate => candidate.message_id === item.message_id) === index);
@@ -251,6 +262,7 @@ export function ChatSearchPanel(props: Props) {
   async function searchSummary() {
     const base = request(null);
     if (!base || !summaryTerms.length || searchBusy || expansionBusy || props.disabled || generationScopeLocked) return;
+    const revision = rawRevision.current;
     setSearchBusy(true); setSearchError(""); setResults([]); setContextMessageIds([]); setExcludedMessageIds([]); setCursor(null); setSearched(false);
     try {
       const recalled = await recallTopicMessages(props.api, base, summaryTerms);
@@ -263,7 +275,7 @@ export function ChatSearchPanel(props: Props) {
         topic: summaryTopic.trim(), mode: "complete", summary_type: "mixed",
         included_message_ids: recalled.map(item => item.message_id), excluded_message_ids: [],
       });
-      if (alive.current) {
+      if (alive.current && revision === rawRevision.current) {
         const hits = new Set(recalled.map(item => item.message_id));
         setResults(context.messages); setContextMessageIds(context.messages.filter(item => !hits.has(item.message_id)).map(item => item.message_id));
         setSearched(true);

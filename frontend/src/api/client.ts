@@ -270,6 +270,12 @@ function parseSearchPage(value: unknown): ChatSearchPage {
   if (new Set(results.map(item => item.message_id)).size !== results.length) return invalid();
   return { results, next_cursor: value.next_cursor === null ? null : requiredString(value.next_cursor) };
 }
+function parseTopicExpansionPreview(value: unknown) {
+  if (!isObject(value)) return invalid();
+  exactPublicFields(value, ["preview_id", "topic", "outbound_text", "preview_fingerprint", "model", "expires_at_utc"]);
+  return { preview_id: requiredString(value.preview_id), topic: requiredString(value.topic), outbound_text: requiredString(value.outbound_text),
+    preview_fingerprint: disclosureHash(value.preview_fingerprint), model: requiredString(value.model), expires_at_utc: expiresAt(value.expires_at_utc) };
+}
 function parseTopicExpansion(value: unknown): TopicExpansion {
   if (!isObject(value) || !Array.isArray(value.terms) || typeof value.degraded !== "boolean") return invalid();
   exactPublicFields(value, ["topic", "terms", "degraded"]);
@@ -469,12 +475,14 @@ function parseDocumentVersion(value: unknown): DocumentVersion {
 function parseDocument(value: unknown): HowToDocument {
   if (!isObject(value) || !Array.isArray(value.versions) || !Array.isArray(value.source_evidence)) return invalid();
   exactPublicFields(value, ["document_id", "source_generation_job_id", "source_snapshot_id", "created_at", "updated_at",
-    "current_version", "versions", "source_evidence", ...(Object.hasOwn(value, "source_refs") ? ["source_refs"] : [])]);
+    "current_version", "versions", "source_evidence", ...["source_refs", "source_deleted"].filter(key => Object.hasOwn(value, key))]);
+  if (Object.hasOwn(value, "source_deleted") && typeof value.source_deleted !== "boolean") return invalid();
   const document_id = requiredString(value.document_id); const source_generation_job_id = requiredString(value.source_generation_job_id);
   const versions = value.versions.map(parseDocumentVersion); const current_version = parseDocumentVersion(value.current_version);
   if (!versions.length || versions.some(item => item.document_id !== document_id || item.source_generation_job_id !== source_generation_job_id) ||
       !versions.some(item => item.version_id === current_version.version_id)) return invalid();
-  return { document_id, source_generation_job_id, source_snapshot_id: value.source_snapshot_id === null ? null : requiredString(value.source_snapshot_id),
+  return { document_id, source_generation_job_id,
+    ...(Object.hasOwn(value, "source_deleted") ? { source_deleted: value.source_deleted as boolean } : {}), source_snapshot_id: value.source_snapshot_id === null ? null : requiredString(value.source_snapshot_id),
     ...(Object.hasOwn(value, "source_refs") ? { source_refs: parseSourceRefs(value.source_refs) } : {}),
     created_at: expiresAt(value.created_at), updated_at: expiresAt(value.updated_at), current_version, versions,
     source_evidence: value.source_evidence.map(parseEvidence) };
@@ -505,9 +513,11 @@ function parseDeletionCounts(value: unknown): Record<DeletionCountKey, number> {
 }
 function parseDeletionPlan(value: unknown): DeletionPlan {
   if (!isObject(value) || !Array.isArray(value.effects) || typeof value.include_managed_files !== "boolean") return invalid();
-  exactPublicFields(value, ["plan_id", "target_kind", "target_id", "include_managed_files", "fingerprint", "counts", "effects", "expires_at"]);
+  exactPublicFields(value, ["plan_id", "target_kind", "target_id", "include_managed_files", "fingerprint", "counts", "effects", "expires_at", ...(Object.hasOwn(value, "preserve_documents") ? ["preserve_documents"] : [])]);
+  if (Object.hasOwn(value, "preserve_documents") && typeof value.preserve_documents !== "boolean") return invalid();
   return { plan_id: requiredString(value.plan_id), target_kind: member(["document", "batch", "content_batch"] as const, value.target_kind),
     target_id: requiredString(value.target_id), include_managed_files: value.include_managed_files,
+    ...(Object.hasOwn(value, "preserve_documents") ? { preserve_documents: value.preserve_documents as boolean } : {}),
     fingerprint: disclosureHash(value.fingerprint), counts: parseDeletionCounts(value.counts),
     effects: value.effects.map(requiredString), expires_at: expiresAt(value.expires_at) };
 }
@@ -566,7 +576,7 @@ function parseImportAnalysis(analysis: unknown): ImportPreview["analysis"] {
 }
 function parseImportCommit(value: unknown): ImportCommit {
   if (!isObject(value) || !Array.isArray(value.conversations) || !Array.isArray(value.warnings) || value.source_id !== "manual") return invalid();
-  exactPublicFields(value, ["import_id", "batch_id", "snapshot_id", "source_id", "account_id", "range_start", "range_end", "display_timezone", "conversations", "warnings", ...(Object.hasOwn(value, "analysis") ? ["analysis"] : [])]);
+  exactPublicFields(value, ["import_id", "batch_id", "snapshot_id", "source_id", "account_id", "range_start", "range_end", "display_timezone", "conversations", "warnings", ...["analysis", "imported_count", "skipped_count", "raw_expires_at_utc"].filter(key => Object.hasOwn(value, key))]);
   const range_start = expiresAt(value.range_start); const range_end = expiresAt(value.range_end);
   const display_timezone = requiredString(value.display_timezone);
   if (Date.parse(range_end) <= Date.parse(range_start)) return invalid();
@@ -581,7 +591,10 @@ function parseImportCommit(value: unknown): ImportCommit {
     source_id: "manual", account_id: requiredString(value.account_id), range_start, range_end,
     display_timezone,
     conversations, warnings: plainStrings(value.warnings),
-    ...(Object.hasOwn(value, "analysis") ? { analysis: parseImportAnalysis(value.analysis) } : {}) };
+    ...(Object.hasOwn(value, "analysis") ? { analysis: parseImportAnalysis(value.analysis) } : {}),
+    ...(Object.hasOwn(value, "imported_count") ? { imported_count: nullableInteger(value.imported_count) ?? invalid() } : {}),
+    ...(Object.hasOwn(value, "skipped_count") ? { skipped_count: nullableInteger(value.skipped_count) ?? invalid() } : {}),
+    ...(Object.hasOwn(value, "raw_expires_at_utc") ? { raw_expires_at_utc: expiresAt(value.raw_expires_at_utc) } : {}) };
 }
 function parseImportRecoveryPage(value: unknown): ImportRecoveryPage {
   if (!isObject(value) || !Array.isArray(value.imports)) return invalid();
@@ -617,7 +630,7 @@ function parseContentPreview(value: unknown): ContentPreview {
 }
 function parseContentBatch(value: unknown): ContentBatch {
   if (!isObject(value) || !Array.isArray(value.images)) return invalid();
-  exactPublicFields(value, ["batch_id", "unit_count", "image_count", "images", "created_at_utc"]);
+  exactPublicFields(value, ["batch_id", "unit_count", "image_count", "images", "created_at_utc", ...(Object.hasOwn(value, "raw_expires_at_utc") ? ["raw_expires_at_utc"] : [])]);
   const integer = (item: unknown) => Number.isInteger(item) && Number(item) >= 0 ? Number(item) : invalid();
   const images = value.images.map(item => {
     if (!isObject(item)) return invalid();
@@ -627,7 +640,8 @@ function parseContentBatch(value: unknown): ContentBatch {
   const image_count = integer(value.image_count);
   if (images.length !== image_count) return invalid();
   return { batch_id: requiredString(value.batch_id), unit_count: integer(value.unit_count), image_count,
-    images, created_at_utc: expiresAt(value.created_at_utc) };
+    images, created_at_utc: expiresAt(value.created_at_utc),
+    ...(Object.hasOwn(value, "raw_expires_at_utc") ? { raw_expires_at_utc: expiresAt(value.raw_expires_at_utc) } : {}) };
 }
 function parseContentBatchPage(value: unknown): ContentBatchPage {
   if (!isObject(value) || !Array.isArray(value.items)) return invalid();
@@ -815,11 +829,11 @@ export function createClient() {
           !validTimezone(value.options.timezone)) return Promise.reject(new ApiError(0));
       return request("/api/imports/previews", parseImportPreview, value);
     },
-    commitImport: (preview_id: string, preview_fingerprint: string) => {
+    commitImport: (preview_id: string, preview_fingerprint: string, accept_skipped = false) => {
       if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(preview_id) || !/^[a-f0-9]{64}$/.test(preview_fingerprint))
         return Promise.reject(new ApiError(0));
       return request(`/api/imports/previews/${encodeURIComponent(preview_id)}/commit`, parseImportCommit,
-        { preview_fingerprint, confirmed: true });
+        { preview_fingerprint, confirmed: true, ...(accept_skipped ? { accept_skipped: true } : {}) });
     },
     recoverImports: (cursor: string | null = null, limit = 20) => {
       if ((cursor !== null && !/^[A-Za-z0-9_-]{1,256}$/.test(cursor)) ||
@@ -877,9 +891,18 @@ export function createClient() {
           (search.cursor !== null && (!search.cursor || search.cursor.length > 2048))) return Promise.reject(new ApiError(0));
       return request("/api/search/from-selections", parseSearchPage, search);
     },
-    expandTopic: (topic: string) => {
+    previewTopicExpansion: (topic: string) => {
       if (!topic.trim() || topic.length > 512) return Promise.reject(new ApiError(0));
-      return request("/api/generation/topic-expansion", parseTopicExpansion, { topic: topic.trim() });
+      return request("/api/generation/topic-expansion/previews", parseTopicExpansionPreview, { topic: topic.trim() });
+    },
+    expandTopic: async (topic: string): Promise<TopicExpansion> => {
+      if (!topic.trim() || topic.length > 512) throw new ApiError(0);
+      const preview = await request("/api/generation/topic-expansion/previews", parseTopicExpansionPreview, { topic: topic.trim() });
+      if (Date.parse(preview.expires_at_utc) <= Date.now()) throw new ApiError(0);
+      const accepted = window.confirm(`本次关键词扩展将向外部 AI 模型发送以下完整脱敏正文，可能产生一次额外费用。脱敏不保证覆盖全部个人信息。\n模型：${preview.model}\n\n${preview.outbound_text}\n\n是否授权这一次发送？取消后仅使用本地关键词检索。`);
+      if (!accepted) return { topic: topic.trim(), terms: [topic.trim()], degraded: true };
+      return request("/api/generation/topic-expansion", parseTopicExpansion,
+        { preview_id: preview.preview_id, preview_fingerprint: preview.preview_fingerprint, confirmed: true });
     },
     previewGenerationContext: (selection: GenerationSelectionRequest) => request(
       "/api/generation/contexts/from-selections", (value: unknown): GenerationContext => {
@@ -977,10 +1000,15 @@ export function createClient() {
       if (!response.ok) throw new ApiError(response.status);
       return response.blob();
     },
-    prepareDeletion: (target_kind: "document" | "batch" | "content_batch", target_id: string, include_managed_files: boolean) => {
+    retentionStatus: () => request("/api/retention", (value: unknown) => {
+      if (!isObject(value)) return invalid();
+      exactPublicFields(value, ["cleaned_batches", "pending_cleanups"]);
+      return { cleaned_batches: nullableInteger(value.cleaned_batches) ?? invalid(), pending_cleanups: nullableInteger(value.pending_cleanups) ?? invalid() };
+    }),
+    prepareDeletion: (target_kind: "document" | "batch" | "content_batch", target_id: string, include_managed_files: boolean, preserve_documents = false) => {
       if (!["document", "batch", "content_batch"].includes(target_kind) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(target_id))
         return Promise.reject(new ApiError(0));
-      return request("/api/deletion-plans", parseDeletionPlan, { target_kind, target_id, include_managed_files });
+      return request("/api/deletion-plans", parseDeletionPlan, { target_kind, target_id, include_managed_files, ...(preserve_documents ? { preserve_documents: true } : {}) });
     },
     confirmDeletion: (plan_id: string, fingerprint: string) => {
       if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(plan_id) || !/^[a-f0-9]{64}$/.test(fingerprint))

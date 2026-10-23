@@ -126,6 +126,8 @@ class DocumentService:
         if current.current_version.version_id != parent_version_id:
             raise DocumentConflict("parent version is not current")
         allowed = {item.message_id for item in current.source_evidence}
+        if current.source_deleted:
+            allowed.update(_referenced_message_ids(current.current_version.content))
         if not set(_referenced_message_ids(content)) <= allowed:
             raise DocumentConflict("user edit contains unavailable evidence")
         try:
@@ -215,6 +217,7 @@ class DocumentService:
             return HowToDocument(
                 document_id=str(row["document_id"]),
                 source_generation_job_id=str(row["source_generation_job_id"]),
+                source_deleted=bool(row.get("source_deleted", False)),
                 source_snapshot_id=None if isinstance(source, ValidatedMixedGeneration) else source.snapshot_id,
                 source_refs=source.source_refs if isinstance(source, ValidatedMixedGeneration) else (),
                 created_at=datetime.fromisoformat(str(row["created_at_utc"])),

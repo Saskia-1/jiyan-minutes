@@ -5,10 +5,15 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 import json
+from datetime import datetime, timedelta, timezone
+from hashlib import sha256
+from threading import RLock
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from chat_to_howto.providers.base import CancellationToken, LLMProvider, ProviderRequest
+from chat_to_howto.services.generation_redaction import redact_outbound_text
 
 
 _PROMPT = (
@@ -32,31 +37,83 @@ class TopicExpansionView(BaseModel):
     degraded: bool
 
 
+class TopicExpansionPreview(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    preview_id: str
+    topic: str = Field(repr=False)
+    outbound_text: str = Field(repr=False)
+    preview_fingerprint: str
+    model: str
+    expires_at_utc: datetime
+
+
 class TopicExpansionService:
     def __init__(
         self, *, provider_factory: Callable[[str], LLMProvider], provider: str,
-        model: str,
+        model: str, clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._provider_factory = provider_factory
         self._provider = provider
         self._model = model
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._lock = RLock()
+        self._previews: dict[str, tuple[str, TopicExpansionPreview, ProviderRequest]] = {}
+
+    def _request(self, topic: str) -> ProviderRequest:
+        return ProviderRequest(
+            model=self._model, system_prompt=_PROMPT,
+            payload=json.dumps({"operation": "expand_topic", "topic": topic},
+                ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+            max_output_tokens=256,
+        )
+
+    def create_preview(self, topic: str, *, session_id: str) -> TopicExpansionPreview:
+        normalized = topic.strip()
+        if not session_id or not normalized or len(normalized) > 512:
+            raise ValueError("topic preview is invalid")
+        redacted = redact_outbound_text(normalized, policy_revision="text-only-outbound-v1")
+        request = self._request(redacted)
+        now = self._clock()
+        preview = TopicExpansionPreview(
+            preview_id=uuid4().hex, topic=redacted, outbound_text=request.payload.decode("utf-8"),
+            preview_fingerprint=sha256(request.payload + b"\0" + request.model.encode()
+                + b"\0" + request.system_prompt.encode()).hexdigest(),
+            model=self._model, expires_at_utc=now + timedelta(minutes=5),
+        )
+        with self._lock:
+            self._previews = {key: value for key, value in self._previews.items()
+                if value[1].expires_at_utc > now}
+            if len(self._previews) >= 128:
+                raise ValueError("too many pending topic previews")
+            self._previews[preview.preview_id] = (sha256(session_id.encode()).hexdigest(), preview, request)
+        return preview
+
+    def expand_authorized(self, preview_id: str, *, preview_fingerprint: str,
+        confirmed: bool, session_id: str) -> TopicExpansionView:
+        with self._lock:
+            pending = self._previews.get(preview_id)
+            if (confirmed is not True or not session_id or pending is None
+                or pending[0] != sha256(session_id.encode()).hexdigest()
+                or pending[1].preview_fingerprint != preview_fingerprint):
+                raise PermissionError("topic authorization is unavailable")
+            del self._previews[preview_id]
+            if pending[1].expires_at_utc <= self._clock():
+                raise PermissionError("topic authorization expired")
+        return self._expand_request(pending[1].topic, pending[2])
 
     def expand(self, topic: str) -> TopicExpansionView:
         normalized = topic.strip()
         if not normalized or len(normalized) > 512:
             raise ValueError("topic must be nonblank and bounded")
+        return self._expand_request(normalized, self._request(normalized))
+
+    def _expand_request(self, normalized: str, request: ProviderRequest) -> TopicExpansionView:
         fallback = TopicExpansionView(topic=normalized, terms=(normalized,), degraded=True)
         try:
             provider = self._provider_factory(self._provider)
             response = asyncio.run(provider.generate(
-                ProviderRequest(
-                    model=self._model, system_prompt=_PROMPT,
-                    payload=json.dumps(
-                        {"operation": "expand_topic", "topic": normalized},
-                        ensure_ascii=False, separators=(",", ":"),
-                    ).encode("utf-8"),
-                    max_output_tokens=256,
-                ),
+                request,
                 CancellationToken(),
             ))
             if response.finish_reason != "stop":

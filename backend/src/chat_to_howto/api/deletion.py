@@ -19,6 +19,7 @@ class CreateDeletionPlanRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True, hide_input_in_errors=True)
     target_kind: Literal["document", "batch", "content_batch"]
     target_id: str = Field(min_length=1, max_length=128, pattern=_OPAQUE_PATTERN)
+    preserve_documents: bool = False
     include_managed_files: bool
 
 
@@ -37,7 +38,7 @@ def create_deletion_router(*, get_service: Callable[[], DeletionService],
                     session_id: str = Depends(require_session), _csrf: object = Depends(require_csrf)) -> DeletionPlanView:
         try:
             return service.create_plan(target_kind=request.target_kind, target_id=request.target_id,
-                include_managed_files=request.include_managed_files, session_id=session_id)
+                include_managed_files=request.include_managed_files, preserve_documents=request.preserve_documents, session_id=session_id)
         except PermissionError:
             raise HTTPException(status_code=403, detail="deletion target is unavailable") from None
         except ValueError:

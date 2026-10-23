@@ -424,3 +424,95 @@ it("按页加载更早的可清理导入批次", async () => {
   expect(recoverImports).toHaveBeenNthCalledWith(2, "import:a");
   expect(screen.getByRole("region", { name: "删除已导入批次 2" })).toBeVisible();
 });
+
+it("部分导入必须独立接受跳过，取消接受会清除提交确认", async () => {
+  const partial = { ...preview, analysis: { ...preview.analysis, total_count: 2, unresolved_count: 1,
+    issues: [{ row_number: 2, code: "invalid_text" }] } };
+  const api = { recoverImports: vi.fn().mockResolvedValue(emptyRecovery),
+    previewImport: vi.fn().mockResolvedValue(partial), commitImport: vi.fn().mockResolvedValue({ ...committed,
+      imported_count: 1, skipped_count: 1 }), searchChats: vi.fn().mockResolvedValue({ results: [], next_cursor: null })
+  } as unknown as LocalApiClient;
+  const { ChatImportPanel } = await import("./ChatImportPanel");
+  const user = userEvent.setup();
+  render(<ChatImportPanel api={api} outputRootId="" />);
+  await user.click(screen.getByRole("radio", { name: "粘贴文本" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "聊天文本" }), { target: { value: "synthetic" } });
+  await user.click(screen.getByRole("button", { name: "生成导入预览" }));
+  const confirm = await screen.findByRole("checkbox", { name: /确认按此预览导入/ });
+  expect(confirm).toBeDisabled();
+  const skip = screen.getByRole("checkbox", { name: "接受跳过 1 条未解析记录，仅导入 1 条有效记录" });
+  await user.click(skip); await user.click(confirm); await user.click(skip);
+  expect(confirm).not.toBeChecked();
+  expect(screen.getByRole("button", { name: "确认导入本地索引" })).toBeDisabled();
+  await user.click(skip); await user.click(confirm);
+  await user.click(screen.getByRole("button", { name: "确认导入本地索引" }));
+  expect(await screen.findByText("已导入 1 条有效记录，已跳过 1 条未解析记录。")).toBeVisible();
+  expect(api.commitImport).toHaveBeenCalledWith(partial.preview_id, partial.preview_fingerprint, true);
+});
+
+it("主题扩展降级仍拆分用户输入的多个关键词进行本地检索", async () => {
+  const api = { recoverImports: vi.fn().mockResolvedValue({ imports: [committed], next_cursor: null }),
+    searchChats: vi.fn().mockResolvedValue({ results: [], next_cursor: null }),
+    expandTopic: vi.fn().mockResolvedValue({ topic: "创业、就业", terms: ["创业、就业"], degraded: true }),
+  } as unknown as LocalApiClient;
+  const { ChatImportPanel } = await import("./ChatImportPanel");
+  const user = userEvent.setup();
+  render(<ChatImportPanel compact api={api} outputRootId="" />);
+  await screen.findByText(/当前聊天/);
+  await user.type(screen.getByRole("textbox", { name: "关键词" }), "创业、就业");
+  await user.click(screen.getByRole("checkbox", { name: /自动扩展相关关键词/ }));
+  await user.click(screen.getByText("查看检索范围与关键词"));
+  await user.click(screen.getByRole("button", { name: "预览相关消息" }));
+  await waitFor(() => expect(api.searchChats).toHaveBeenCalledWith(expect.objectContaining({ query: "创业" })));
+  expect(api.searchChats).toHaveBeenCalledWith(expect.objectContaining({ query: "就业" }));
+  expect(screen.getByText(/已按原主题及输入的关键词进行本地搜索/)).toBeVisible();
+});
+
+it("清理原文后清空聊天缓存并保留已打开文档的未保存编辑", async () => {
+  const content = { status: "complete" as const, title: "合成文档", preparations: [], steps: [], checks: [], missing_information: [], conflicts: [] };
+  const version = { document_id: "document:retained", version_id: "version:retained", ordinal: 1, origin: "ai_generated" as const,
+    evidence_status: "verified" as const, parent_version_id: null, restored_from_version_id: null,
+    source_generation_job_id: "job:retained", change_summary: "", created_at: "2026-10-23T00:00:00Z", content };
+  const doc = { document_id: version.document_id, source_generation_job_id: "job:retained", source_snapshot_id: committed.snapshot_id,
+    created_at: version.created_at, updated_at: version.created_at, current_version: version, versions: [version], source_evidence: [{ message_id: "evidence:expired", conversation_id: "c", timestamp: null, sender_id: null, sender_name: null, quote: "待清理的依据" }] };
+  const rows = [{ message_id: "message:expired", conversation_id: "c", timestamp: null, sender_id: null,
+    sender_name: "合成发送者", text: "待清理的原文", batch_id: committed.batch_id, snapshot_id: committed.snapshot_id }];
+  const api = { recoverImports: vi.fn().mockResolvedValue({ imports: [committed], next_cursor: null }),
+    searchChats: vi.fn().mockResolvedValue({ results: rows, next_cursor: null }),
+    recoverDocuments: vi.fn().mockResolvedValue({ documents: [doc], next_cursor: null }), document: vi.fn().mockResolvedValue(doc),
+  } as unknown as LocalApiClient;
+  const { ChatImportPanel } = await import("./ChatImportPanel");
+  const user = userEvent.setup();
+  render(<ChatImportPanel compact api={api} outputRootId="" />);
+  await user.click(await screen.findByText(/展开聊天内容（1 条/));
+  expect(screen.getByText("待清理的原文")).toBeVisible();
+  await user.click(screen.getByText("已保存的文档"));
+  await user.click(await screen.findByRole("button", { name: "打开最新版本" }));
+  await user.click(screen.getByRole("radio", { name: "是" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "完整文档" }), { target: { value: "# 未保存的新标题\n\n本地编辑" } });
+  vi.mocked(api.searchChats).mockRejectedValue(new ApiError(404));
+  vi.mocked(api.recoverImports).mockResolvedValue(emptyRecovery);
+  fireEvent(window, new Event("minutes-raw-cleared"));
+  await waitFor(() => expect(screen.queryByText("待清理的原文")).not.toBeInTheDocument());
+  expect(screen.queryByText("待清理的依据")).not.toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "完整文档" })).toHaveValue("# 未保存的新标题\n\n本地编辑");
+  expect(screen.getByRole("button", { name: "开始整理" })).toBeDisabled();
+});
+
+it("清理发生后忽略较早的导入预览响应，避免原文重新出现", async () => {
+  let resolvePreview!: (value: typeof preview) => void;
+  const api = { recoverImports: vi.fn().mockResolvedValue(emptyRecovery),
+    previewImport: vi.fn().mockReturnValue(new Promise<typeof preview>(resolve => { resolvePreview = resolve; })),
+  } as unknown as LocalApiClient;
+  const { ChatImportPanel } = await import("./ChatImportPanel");
+  const user = userEvent.setup();
+  render(<ChatImportPanel api={api} outputRootId="" />);
+  await user.click(screen.getByRole("radio", { name: "粘贴文本" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "聊天文本" }), { target: { value: "synthetic" } });
+  await user.click(screen.getByRole("button", { name: "生成导入预览" }));
+  fireEvent(window, new Event("minutes-raw-cleared"));
+  resolvePreview(preview);
+  await waitFor(() => expect(screen.getByRole("radio", { name: "导入文件" })).toBeEnabled());
+  expect(screen.queryByRole("region", { name: "导入预览" })).not.toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "聊天文本" })).toHaveValue("");
+});

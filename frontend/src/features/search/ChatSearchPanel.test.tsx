@@ -290,3 +290,17 @@ it("可通过影响计划删除导出批次并清空已失效搜索状态", asyn
   expect(client.confirmDeletion).toHaveBeenCalledWith("deletion-plan:batch", "d".repeat(64));
   await waitFor(() => expect(screen.queryByText(/已完成并可搜索/)).not.toBeInTheDocument());
 });
+
+it("原文清理后忽略旧搜索响应并撤销生成范围", async () => {
+  let resolveSearch!: (value: typeof firstPage) => void;
+  const client = api({ searchChats: vi.fn().mockReturnValue(new Promise<typeof firstPage>(resolve => { resolveSearch = resolve; })) });
+  const { ChatSearchPanel } = await import("./ChatSearchPanel");
+  const user = userEvent.setup();
+  render(<ChatSearchPanel {...props} api={client} />);
+  await user.click(screen.getByRole("checkbox", { name: /选择 合成会话 A/ }));
+  await user.click(screen.getByRole("button", { name: "搜索本地聊天" }));
+  act(() => { window.dispatchEvent(new Event("minutes-raw-cleared")); });
+  await act(async () => { resolveSearch(firstPage); });
+  expect(screen.queryByText("第一条合成结果")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "预览 AI 外发" })).toBeDisabled();
+});

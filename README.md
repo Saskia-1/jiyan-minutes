@@ -1,13 +1,12 @@
-# Chat to How-To
+# 记言 · Minutes
 
-Chat to How-To 是一个中文、本地优先、单用户的 macOS Web 应用：在用户明确选择并确认后，从 QQ 或微信的受审查本机适配器导出窄范围聊天，原子保存、校验并导入 SQLite；随后可本地搜索、按独立授权调用 DeepSeek 生成带证据的操作指南、人工编辑版本，并导出 Markdown 或 DOCX。
+记言 · Minutes 是一个中文、本地优先、单用户的 macOS Web 应用：在用户明确选择并确认后，从 QQ 或微信的受审查本机适配器导出窄范围聊天，原子保存、校验并导入 SQLite；随后可本地搜索、按独立授权调用 DeepSeek 生成带证据的操作指南、人工编辑版本，并导出 Markdown 或 DOCX。
 
 当前代码和合成测试可运行；**真实 QQ、微信导出仍未验证**。平台已提供全本地的 TXT、JSON、JSONL、CSV、XLSX、受支持单文件 ZIP 和粘贴文本导入，必须先预览、再确认，然后复用同一套 Snapshot → Search → Generation → Document 链路；已确认批次可凭当前 HttpOnly 本地浏览器会话在 7 天绝对恢复窗口内分页恢复并逐批删除。QCE v6.2.10 与 TraceMemo v2.3.0 的固定官方发布资产已完成独立摘要核对和离线静态审计，但均因签名/公证、原生能力、启动副作用、许可/版本或兼容证据问题判定为 `blocked / NO-GO`，没有安装或启动。项目不会自动登录账号、读取聊天目录、获取微信数据库密钥、提权、关闭 SIP、授予完全磁盘访问、修改或重签名客户端。详见 [P4 导入与 Accessibility POC](docs/p4-real-chat-ingestion.md)、[Ultra Gate 1 调研记录](docs/ultra-gate-1-research.md)、[发布物静态审计](docs/ultra-gate-1-binary-audit.md)、[验收报告](docs/acceptance-report.md) 和 [来源配置](docs/source-setup.md)。
 
 ## Apple Silicon 安装
 
 要求：macOS Apple Silicon、Python 3.11+、Node.js 24.x 与 corepack。脚本只安装本项目锁定依赖和创建用户明确批准的本地目录；不会安装聊天导出工具。
-to
 ```sh
 ./scripts/bootstrap_macos.sh
 ```
@@ -59,7 +58,7 @@ export DEEPSEEK_API_KEY="在本机私密地设置，不要写入仓库或聊天"
 ./scripts/start_macos.sh
 ```
 
-本项目尚未用真实 Key 发起 DeepSeek 调用。价格显示为不可用，不会凭空估算；每日请求数默认上限 100，可在私有运行配置中降低。完整说明见 [API 配置指南](docs/api-setup.md)。
+已完成一次“工作”主题的真实模型调测，范围与限制见 [调测记录](docs/real-model-work-smoke-test.md)；记录中的新写作规则随后已撤回，当前 v10 总结方式没有追加真实模型质量验收。价格显示为不可用，不会凭空估算；每日请求数默认上限 100，可在私有运行配置中降低。完整说明见 [API 配置指南](docs/api-setup.md)。
 
 ## 开发与验证
 

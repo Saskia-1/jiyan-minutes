@@ -1,3 +1,4 @@
+import { useRawEvidenceGuard, withoutRawEvidence } from "../data/useRawEvidenceGuard";
 import { useEffect, useState } from "react";
 import type { LocalApiClient } from "../../api/client";
 import type { LegacyChatSummary, TopicSection, HowToDocument } from "../../types";
@@ -32,6 +33,7 @@ function LegacyDocumentEditor({ api, generationJobId, initialDocument = null, ou
   api: LocalApiClient; generationJobId?: string; initialDocument?: HowToDocument | null;
   outputRootId?: string; onDeleted?: (documentId: string) => void;
 }) {
+  const guardRawEvidence = useRawEvidenceGuard();
   const [document, setDocument] = useState<HowToDocument | null>(initialDocument);
   const [title, setTitle] = useState("");
   const [steps, setSteps] = useState<string[]>([]);
@@ -44,6 +46,11 @@ function LegacyDocumentEditor({ api, generationJobId, initialDocument = null, ou
   const [sourceMode, setSourceMode] = useState<"body_only" | "with_sources">("body_only");
   const [artifact, setArtifact] = useState("");
 
+  useEffect(() => {
+    const clear = () => setDocument(value => value ? { ...value, source_deleted: true, source_evidence: [] } : value);
+    window.addEventListener("minutes-raw-cleared", clear);
+    return () => window.removeEventListener("minutes-raw-cleared", clear);
+  }, []);
   useEffect(() => {
     if (!document) return;
     setTitle(document.current_version.content.title);
@@ -60,7 +67,7 @@ function LegacyDocumentEditor({ api, generationJobId, initialDocument = null, ou
   async function create() {
     if (busy || !generationJobId) return;
     setBusy(true); setError("");
-    try { setDocument(await api.createDocument(generationJobId)); }
+    try { setDocument(await guardRawEvidence(api.createDocument(generationJobId), withoutRawEvidence)); }
     catch { setError("无法创建本地可编辑文档；生成结果没有被改写。"); }
     finally { setBusy(false); }
   }
@@ -81,7 +88,7 @@ function LegacyDocumentEditor({ api, generationJobId, initialDocument = null, ou
         legacySummary[field].map((item, index) => ({ ...item, text: summaryTexts[field][index].trim() }))])) as unknown as LegacyChatSummary,
     } : { ...original, title: title.trim(),
       steps: original.steps.map((item, index) => ({ ...item, instruction: steps[index].trim() })) };
-    try { setDocument(await api.createDocumentVersion(document.document_id, document.current_version.version_id, content, summary.trim())); }
+    try { setDocument(await guardRawEvidence(api.createDocumentVersion(document.document_id, document.current_version.version_id, content, summary.trim()), withoutRawEvidence)); }
     catch { setError("版本未保存；可能已有更新，请保留页面内容并重新载入后确认。"); }
     finally { setBusy(false); }
   }
@@ -89,7 +96,7 @@ function LegacyDocumentEditor({ api, generationJobId, initialDocument = null, ou
   async function restore(versionId: string) {
     if (!document || busy) return;
     setBusy(true); setError("");
-    try { setDocument(await api.restoreDocumentVersion(document.document_id, versionId)); }
+    try { setDocument(await guardRawEvidence(api.restoreDocumentVersion(document.document_id, versionId), withoutRawEvidence)); }
     catch { setError("无法创建恢复版本；原历史版本保持不变。"); }
     finally { setBusy(false); }
   }

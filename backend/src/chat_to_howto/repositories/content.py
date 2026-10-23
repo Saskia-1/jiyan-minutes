@@ -36,7 +36,7 @@ class ContentRepository:
     def list_batches(self, *, session_digest: str) -> tuple[dict[str, Any], ...]:
         with self._chat._lock:
             rows = self._chat._connection.execute(
-                "SELECT batch_id,created_at_utc,unit_count FROM content_batches WHERE session_digest=? ORDER BY created_at_utc DESC,batch_id DESC",
+                "SELECT batch_id,created_at_utc,unit_count FROM content_batches WHERE session_digest=? AND NOT EXISTS (SELECT 1 FROM chat_raw_retirements r WHERE r.target_kind='content_batch' AND r.target_id=content_batches.batch_id) ORDER BY created_at_utc DESC,batch_id DESC",
                 (session_digest,),
             ).fetchall()
             return tuple(dict(row) for row in rows)
@@ -46,7 +46,7 @@ class ContentRepository:
             rows = self._chat._connection.execute(
                 """SELECT i.image_id,i.input_order,i.sha256,i.basename,i.mime_type
                    FROM content_images i JOIN content_batches b ON b.batch_id=i.batch_id
-                   WHERE i.batch_id=? AND b.session_digest=? ORDER BY i.input_order,i.image_id""",
+                   WHERE i.batch_id=? AND b.session_digest=? AND NOT EXISTS (SELECT 1 FROM chat_raw_retirements r WHERE r.target_kind='content_batch' AND r.target_id=b.batch_id) ORDER BY i.input_order,i.image_id""",
                 (batch_id, session_digest),
             ).fetchall()
             return tuple(dict(row) for row in rows)
@@ -56,7 +56,7 @@ class ContentRepository:
             rows = self._chat._connection.execute(
                 """SELECT u.unit_id,u.batch_id,u.image_id,u.kind,u.group_id,u.source_order,u.text,u.sender_name,u.sent_at
                    FROM content_units u JOIN content_batches b ON b.batch_id=u.batch_id
-                   WHERE u.batch_id=? AND b.session_digest=? ORDER BY u.source_order,u.unit_id""",
+                   WHERE u.batch_id=? AND b.session_digest=? AND NOT EXISTS (SELECT 1 FROM chat_raw_retirements r WHERE r.target_kind='content_batch' AND r.target_id=b.batch_id) ORDER BY u.source_order,u.unit_id""",
                 (batch_id, session_digest),
             ).fetchall()
             return tuple(dict(row) for row in rows)
@@ -66,7 +66,7 @@ class ContentRepository:
             row = self._chat._connection.execute(
                 """SELECT i.basename,i.mime_type FROM content_images i
                    JOIN content_batches b ON b.batch_id=i.batch_id
-                   WHERE i.image_id=? AND b.session_digest=?""",
+                   WHERE i.image_id=? AND b.session_digest=? AND NOT EXISTS (SELECT 1 FROM chat_raw_retirements r WHERE r.target_kind='content_batch' AND r.target_id=b.batch_id)""",
                 (image_id, session_digest),
             ).fetchone()
             return dict(row) if row is not None else None

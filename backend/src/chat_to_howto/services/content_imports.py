@@ -66,6 +66,16 @@ class ContentImportService:
         self._pending: dict[str, _Pending] = {}
         self._ensure_private_root()
 
+    def reconcile_orphan_images(self) -> None:
+        """Remove only known application image names left without committed ownership."""
+        with self._lock, self._repository._chat._lock:
+            owned = {str(row[0]) for row in self._repository._chat._connection.execute("SELECT basename FROM content_images")}
+            for path in self._image_root.iterdir():
+                if re.fullmatch(r"(?:temp-)?[0-9a-f]{32}\.(?:png|jpg)", path.name) and path.name not in owned:
+                    metadata = path.lstat()
+                    if stat.S_ISREG(metadata.st_mode):
+                        path.unlink()
+
     def close(self) -> None:
         with self._lock:
             self._pending.clear()

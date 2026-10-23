@@ -25,7 +25,7 @@ from chat_to_howto.providers.base import (
     ProviderRequest,
     ProviderTimeout,
 )
-from chat_to_howto.repositories.chat import ChatRepository
+from chat_to_howto.repositories.chat import ChatRepository, RawSourceExpired
 from chat_to_howto.repositories.content import ContentRepository
 from chat_to_howto.services.evidence_validation import (
     EvidenceValidationRejected,
@@ -211,6 +211,7 @@ class GenerationJobOrchestrator:
         consent_ttl: timedelta = timedelta(minutes=5),
         max_daily_provider_requests: int = 100,
         mixed_search: MixedSearchService | None = None,
+        retention_sweep: Callable[[], object] | None = None,
     ) -> None:
         if not timedelta(0) < preview_ttl <= timedelta(minutes=15):
             raise ValueError("preview TTL must be between zero and fifteen minutes")
@@ -219,6 +220,7 @@ class GenerationJobOrchestrator:
         if not isinstance(max_daily_provider_requests, int) or isinstance(max_daily_provider_requests, bool) or not 1 <= max_daily_provider_requests <= 10_000:
             raise ValueError("daily provider request limit is invalid")
         self._repository = repository
+        self._retention_sweep = retention_sweep or (lambda: None)
         self._provider_factory = provider_factory
         self._cache_settings = cache_settings
         self._clock = clock or (lambda: datetime.now(timezone.utc))
@@ -231,6 +233,7 @@ class GenerationJobOrchestrator:
         self._evidence_validator = EvidenceValidator(repository, ContentRepository(repository))
         self._active_lock = RLock()
         self._active_tokens: dict[str, CancellationToken] = {}
+        self._revoked_job_ids: set[str] = set()
 
     def _now(self) -> datetime:
         value = self._clock()
@@ -462,6 +465,21 @@ class GenerationJobOrchestrator:
         )
 
     def run_job(self, job_id: str) -> GenerationJobView:
+        try:
+            original = self._repository.get_generation_job(job_id)
+        except ValueError:
+            raise GenerationJobNotFound("generation job was not found") from None
+        try:
+            return self._run_job(job_id)
+        except ValueError:
+            try:
+                self._repository.get_generation_job(job_id)
+            except ValueError:
+                return self._view({**original, "state": "cancelled", "cancellation_requested": 1,
+                    "result_json": None, "evidence_status": "unverified", "error_code": "cancelled"})
+            raise
+
+    def _run_job(self, job_id: str) -> GenerationJobView:
         self._require_opaque(job_id, "generation job ID")
         try:
             row = self._repository.get_generation_job(job_id)
@@ -474,6 +492,7 @@ class GenerationJobOrchestrator:
         row = self._repository.get_generation_job(job_id)
         session_id_digest = str(row["session_digest"])
         try:
+            self._repository.require_generation_sources(str(row["scope_json"]), session_digest=session_id_digest, now_utc=self._now().isoformat())
             scope = self._scope_from_row(row)
             settings = self._settings_from_row(row)
             identity = self._identity_from_row(row)
@@ -546,6 +565,15 @@ class GenerationJobOrchestrator:
                 except PermissionError:
                     raise GenerationDailyUsageExceeded from None
                 with self._active_lock:
+                    # Cleanup may have revoked and deleted this job while the
+                    # request reservation was being created. Never send its
+                    # captured in-memory scope after that boundary.
+                    if job_id in self._revoked_job_ids:
+                        raise ProviderCancelled("generation source was revoked")
+                    live = self._repository.get_generation_job(job_id)
+                    self._repository.require_generation_sources(str(live["scope_json"]), session_digest=session_id_digest, now_utc=self._now().isoformat())
+                    if live["state"] in _TERMINAL or live["cancellation_requested"]:
+                        return self._view(live)
                     self._active_tokens[job_id] = token
                 try:
                     try:
@@ -633,6 +661,11 @@ class GenerationJobOrchestrator:
             return self._complete(
                 self._repository.get_generation_job(job_id), verified, cache_hit=False
             )
+        except RawSourceExpired:
+            # Both repository and active-token locks have unwound here. Cleanup
+            # may revoke this worker and other jobs without reversing lock order.
+            self._retention_sweep()
+            return self._cancel_current(job_id)
         except ProviderCancelled:
             return self._cancel_current(job_id)
         except ProviderTimeout:
@@ -656,7 +689,13 @@ class GenerationJobOrchestrator:
         except GenerationJobConflict:
             return self._fail_current(job_id, "job_invalid")
         except Exception:
-            return self._fail_current(job_id, "generation_failed")
+            try:
+                return self._fail_current(job_id, "generation_failed")
+            except ValueError:
+                # Raw deletion intentionally removes process records. Return a
+                # cancelled view without recreating any record or raw content.
+                return self._view({**row, "state": "cancelled", "cancellation_requested": 1,
+                    "result_json": None, "evidence_status": "unverified", "error_code": "cancelled"})
 
     def _finish_request(
         self, request_record_id: str, *, status: str,
@@ -707,6 +746,7 @@ class GenerationJobOrchestrator:
             scope_fingerprint=identity.scope_fingerprint,
             identity_json=identity.model_dump_json(),
             result_json=result.model_dump_json(),
+            now_utc=self._now().isoformat(),
         )
 
     def _validate_digest(self, merged, *, scope: AnyGenerationScope, session_digest: str):
@@ -739,6 +779,7 @@ class GenerationJobOrchestrator:
         *,
         cache_hit: bool,
     ) -> GenerationJobView:
+        self._repository.require_generation_sources(str(row["scope_json"]), session_digest=str(row["session_digest"]), now_utc=self._now().isoformat())
         cancelled = self._cancel_boundary(row)
         if cancelled is not None:
             return cancelled
@@ -796,6 +837,15 @@ class GenerationJobOrchestrator:
             ):
                 return self._current(job_id)
         raise GenerationJobConflict("generation job changed repeatedly while failing")
+
+    def revoke_jobs(self, job_ids: tuple[str, ...]) -> None:
+        """Cancel live provider tokens without changing a deletion fingerprint."""
+        with self._active_lock:
+            for job_id in job_ids:
+                self._revoked_job_ids.add(job_id)
+                token = self._active_tokens.get(job_id)
+                if token is not None:
+                    token.cancel()
 
     def cancel_job(self, job_id: str, *, session_id: str) -> GenerationJobView:
         row = self._job_for_session(job_id, session_id=session_id)

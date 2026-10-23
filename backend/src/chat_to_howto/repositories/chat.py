@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from base64 import b64decode, b64encode
 from binascii import Error as Base64Error
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import fcntl
 from hashlib import sha256
 import json
@@ -23,6 +23,10 @@ from chat_to_howto.domain.imports import ImportAnalysis, ManualImportCommit
 from chat_to_howto.domain.manifest import BatchManifest
 from chat_to_howto.domain.messages import AttachmentPlaceholder, MessageInput, StoredMessage
 from chat_to_howto.migrations import apply_migrations, open_connection
+
+
+class RawSourceExpired(PermissionError):
+    """An imported source has reached its absolute seven-day deadline."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1180,10 +1184,12 @@ class ChatRepository:
                     SELECT snapshot_id, batch_id
                     FROM chat_export_jobs
                     WHERE session_digest = ? AND state = 'complete' AND searchable = 1
+                      AND NOT EXISTS (SELECT 1 FROM chat_raw_retirements retired WHERE retired.target_kind='batch' AND retired.target_id=chat_export_jobs.batch_id)
                     UNION
                     SELECT snapshot_id, batch_id
                     FROM chat_manual_imports
                     WHERE session_digest = ? AND state = 'complete'
+                      AND NOT EXISTS (SELECT 1 FROM chat_raw_retirements retired WHERE retired.target_kind='batch' AND retired.target_id=chat_manual_imports.batch_id)
                 )
                 SELECT DISTINCT snapshot.batch_id
                 FROM authorized_snapshots AS authorized
@@ -1247,6 +1253,7 @@ class ChatRepository:
                     WHERE selection.handle_digest = ?
                       AND imported.session_digest = ?
                       AND imported.state = 'complete'
+                      AND NOT EXISTS (SELECT 1 FROM chat_raw_retirements retired WHERE retired.target_kind='batch' AND retired.target_id=imported.batch_id)
                     """,
                     (handle_digest, session_digest),
                 ).fetchone()
@@ -1304,6 +1311,7 @@ class ChatRepository:
                   ON snapshot.snapshot_id = imported.snapshot_id
                  AND snapshot.batch_id = imported.batch_id
                 WHERE imported.session_digest = ? AND imported.state = 'complete'
+                  AND NOT EXISTS (SELECT 1 FROM chat_raw_retirements retired WHERE retired.target_kind='batch' AND retired.target_id=imported.batch_id)
                   AND snapshot.sealed = 1
                   {cursor_filter}
                 ORDER BY imported.created_at_utc DESC, imported.import_id DESC
@@ -1346,6 +1354,7 @@ class ChatRepository:
                     "import_id": str(row["import_id"]),
                     "batch_id": str(row["batch_id"]),
                     "snapshot_id": str(row["snapshot_id"]),
+                    "created_at_utc": str(row["created_at_utc"]),
                     "scope": scope,
                     "analysis": analysis,
                     "handles": tuple(handles),
@@ -1379,6 +1388,30 @@ class ChatRepository:
                 ).fetchone()
         return dict(row) if row is not None else None
 
+    def require_generation_sources(self, scope_json: str, *, session_digest: str, now_utc: str | None = None) -> None:
+        """Revalidate persisted scopes, including time while workers run without HTTP."""
+        from chat_to_howto.repositories.content import ContentRepository
+        scope = json.loads(scope_json)
+        refs = scope.get("source_refs") or [{"kind": "chat_snapshot", "id": scope["snapshot_id"]}]
+        current = datetime.fromisoformat(now_utc) if now_utc is not None else None
+        with self._lock:
+            deadlines = self.raw_retention_targets() if current is not None else ()
+            for ref in refs:
+                if ref["kind"] == "chat_snapshot":
+                    target_id, _ = self.generation_snapshot_messages(session_digest=session_digest, snapshot_id=ref["id"])
+                    target_kind = "batch"
+                else:
+                    target_id, target_kind = ref["id"], "content_batch"
+                    if not ContentRepository(self).list_units(target_id, session_digest=session_digest):
+                        raise PermissionError("generation source is unavailable")
+                if current is not None and any(
+                    item["target_kind"] == target_kind and item["target_id"] == target_id
+                    and item["session_digest"] == session_digest
+                    and datetime.fromisoformat(str(item["created_at_utc"])) + timedelta(days=7) <= current
+                    for item in deadlines
+                ):
+                    raise RawSourceExpired("generation source expired")
+
     def create_generation_preview(
         self,
         *,
@@ -1400,6 +1433,7 @@ class ChatRepository:
         expires_at_utc: str,
     ) -> None:
         with self._transaction():
+            self.require_generation_sources(scope_json, session_digest=session_digest, now_utc=created_at_utc)
             self._connection.execute(
                 """
                 INSERT INTO chat_generation_previews(
@@ -1468,6 +1502,7 @@ class ChatRepository:
             ).fetchone()
             if preview is None:
                 raise PermissionError("generation preview is unavailable")
+            self.require_generation_sources(str(preview["scope_json"]), session_digest=session_digest, now_utc=recorded_at_utc)
             try:
                 self._connection.execute(
                     """
@@ -1519,6 +1554,7 @@ class ChatRepository:
             ).fetchone()
             if consent is None or consent["session_digest"] != session_digest:
                 raise PermissionError("generation consent is unavailable")
+            self.require_generation_sources(str(consent["scope_json"]), session_digest=session_digest, now_utc=now_utc)
             existing = self._connection.execute(
                 """
                 SELECT * FROM chat_generation_jobs
@@ -1721,7 +1757,13 @@ class ChatRepository:
             ).fetchall()
         return tuple(dict(row) for row in rows)
 
-    def put_generation_cache(
+    def put_generation_cache(self, **kwargs) -> None:
+        # Source validation and the write share the deletion lock. Otherwise a
+        # validated in-memory result could recreate a cache after raw cleanup.
+        with self._lock:
+            self._put_generation_cache_locked(**kwargs)
+
+    def _put_generation_cache_locked(
         self,
         *,
         cache_key: str,
@@ -1730,8 +1772,10 @@ class ChatRepository:
         scope_fingerprint: str,
         identity_json: str,
         result_json: str,
+        now_utc: str | None = None,
     ) -> None:
         """Idempotently store a verified derived result for one local session."""
+        self.require_generation_sources(result_json, session_digest=session_digest, now_utc=now_utc)
         if snapshot_id.startswith("mixed:v2:"):
             from chat_to_howto.repositories.content import ContentRepository
             from chat_to_howto.services.evidence_validation import ValidatedMixedGeneration
@@ -1820,6 +1864,7 @@ class ChatRepository:
                 or job["result_json"] != source_result_json
             ):
                 raise PermissionError("verified generation job is unavailable")
+            self.require_generation_sources(str(job["scope_json"]), session_digest=session_digest, now_utc=created_at_utc)
             self._connection.execute(
                 """
                 INSERT INTO chat_documents(
@@ -2126,6 +2171,7 @@ class ChatRepository:
         fingerprint: str,
         created_at_utc: str,
         expires_at_utc: str,
+        preserve_documents: bool = False,
     ) -> None:
         with self._transaction():
             self._connection.execute(
@@ -2133,12 +2179,12 @@ class ChatRepository:
                 INSERT INTO chat_deletion_plans(
                     plan_id, session_digest, target_kind, target_id,
                     include_managed_files, impact_json, fingerprint,
-                    created_at_utc, expires_at_utc, state
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned')
+                    created_at_utc, expires_at_utc, state, preserve_documents
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?)
                 """,
                 (plan_id, session_digest, target_kind, target_id,
                  int(include_managed_files), impact_json, fingerprint,
-                 created_at_utc, expires_at_utc),
+                 created_at_utc, expires_at_utc, int(preserve_documents)),
             )
 
     def get_deletion_plan(self, plan_id: str) -> dict[str, object]:
@@ -2151,17 +2197,17 @@ class ChatRepository:
         return dict(row)
 
     def deletion_impact(
-        self, *, target_kind: str, target_id: str, session_digest: str
+        self, *, target_kind: str, target_id: str, session_digest: str, preserve_documents: bool = False
     ) -> dict[str, object]:
         with self._lock:
             return self._deletion_impact_locked(
                 target_kind=target_kind,
                 target_id=target_id,
-                session_digest=session_digest,
+                session_digest=session_digest, preserve_documents=preserve_documents,
             )
 
     def _deletion_impact_locked(
-        self, *, target_kind: str, target_id: str, session_digest: str
+        self, *, target_kind: str, target_id: str, session_digest: str, preserve_documents: bool = False
     ) -> dict[str, object]:
         content_batch_ids: list[str] = []
         content_unit_ids: list[str] = []
@@ -2175,7 +2221,9 @@ class ChatRepository:
             if document["session_digest"] != session_digest:
                 raise PermissionError("deletion target belongs to another session")
             document_ids = [target_id]
-            generation_job_ids = [str(document["source_generation_job_id"])]
+            generation_job_ids = [str(document["source_generation_job_id"])] if self._connection.execute(
+                "SELECT 1 FROM chat_generation_jobs WHERE job_id=?", (document["source_generation_job_id"],)
+            ).fetchone() is not None else []
             batch_ids: list[str] = []
             snapshot_ids: list[str] = []
             message_ids: list[str] = []
@@ -2186,9 +2234,9 @@ class ChatRepository:
             owned_export = self._connection.execute(
                 """
                 SELECT 1 FROM chat_export_jobs
-                WHERE batch_id = ? AND session_digest = ?
+                WHERE (batch_id = ? OR planned_batch_id = ?) AND session_digest = ?
                 """,
-                (target_id, session_digest),
+                (target_id, target_id, session_digest),
             ).fetchone()
             manual_import_ids = [
                 str(row["import_id"])
@@ -2213,36 +2261,27 @@ class ChatRepository:
                 "SELECT snapshot_id FROM chat_snapshots WHERE batch_id = ? ORDER BY snapshot_id",
                 (target_id,),
             ).fetchall()]
-            if snapshot_ids:
-                snapshot_placeholders = ",".join("?" for _ in snapshot_ids)
-                batch_placeholders = ",".join("?" for _ in batch_ids)
-                candidate_message_ids = [str(row["message_id"]) for row in self._connection.execute(
-                    f"SELECT DISTINCT message_id FROM chat_snapshot_messages WHERE snapshot_id IN ({snapshot_placeholders}) ORDER BY message_id",
-                    tuple(snapshot_ids),
-                ).fetchall()]
-                message_ids = [str(row["message_id"]) for row in self._connection.execute(
-                    f"""
-                    SELECT DISTINCT target.message_id
-                    FROM chat_snapshot_messages AS target
-                    WHERE target.snapshot_id IN ({snapshot_placeholders})
-                      AND NOT EXISTS (
-                          SELECT 1 FROM chat_batch_messages AS remaining_batch
-                          WHERE remaining_batch.message_id = target.message_id
-                            AND remaining_batch.batch_id NOT IN ({batch_placeholders})
-                      )
-                      AND NOT EXISTS (
-                          SELECT 1 FROM chat_snapshot_messages AS remaining_snapshot
-                          WHERE remaining_snapshot.message_id = target.message_id
-                            AND remaining_snapshot.snapshot_id NOT IN ({snapshot_placeholders})
-                      )
-                    ORDER BY target.message_id
-                    """,
-                    (*snapshot_ids, *batch_ids, *snapshot_ids),
-                ).fetchall()]
-                shared_message_count = len(candidate_message_ids) - len(message_ids)
-            else:
-                message_ids = []
-                shared_message_count = 0
+            # A crash before snapshot sealing may leave only batch membership.
+            # Include both stores and retain identities still owned elsewhere.
+            candidates_sql = """
+                SELECT message_id FROM chat_batch_messages WHERE batch_id = ?
+                UNION
+                SELECT m.message_id FROM chat_snapshot_messages m
+                JOIN chat_snapshots s ON s.snapshot_id=m.snapshot_id WHERE s.batch_id = ?
+            """
+            candidate_message_ids = self._connection.execute(candidates_sql, (target_id, target_id)).fetchall()
+            message_ids = [str(row["message_id"]) for row in self._connection.execute(
+                f"""WITH candidates AS ({candidates_sql})
+                SELECT message_id FROM candidates c
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM chat_batch_messages b WHERE b.message_id=c.message_id AND b.batch_id != ?
+                ) AND NOT EXISTS (
+                    SELECT 1 FROM chat_snapshot_messages m JOIN chat_snapshots s ON s.snapshot_id=m.snapshot_id
+                    WHERE m.message_id=c.message_id AND s.batch_id != ?
+                ) ORDER BY message_id""",
+                (target_id, target_id, target_id, target_id),
+            ).fetchall()]
+            shared_message_count = len(candidate_message_ids) - len(message_ids)
             generation_job_ids = []
             for row in self._connection.execute(
                 "SELECT job_id, scope_json FROM chat_generation_jobs WHERE session_digest = ?",
@@ -2310,6 +2349,9 @@ class ChatRepository:
         else:
             raise ValueError("unsupported deletion target")
 
+        retained_document_ids = sorted(document_ids) if preserve_documents else []
+        if preserve_documents:
+            document_ids = []
         version_ids: list[str] = []
         document_files: list[dict[str, str]] = []
         if document_ids:
@@ -2387,14 +2429,15 @@ class ChatRepository:
         export_consent_ids: list[str] = []
         if batch_ids:
             export_jobs = self._connection.execute(
-                "SELECT job_id, consent_id FROM chat_export_jobs WHERE batch_id = ? AND session_digest = ?",
-                (batch_ids[0], session_digest),
+                "SELECT job_id, consent_id FROM chat_export_jobs WHERE (batch_id = ? OR planned_batch_id = ?) AND session_digest = ?",
+                (batch_ids[0], batch_ids[0], session_digest),
             ).fetchall()
             export_job_ids = [str(row["job_id"]) for row in export_jobs]
             export_consent_ids = sorted({str(row["consent_id"]) for row in export_jobs if row["consent_id"] is not None})
         return {
             "target_kind": target_kind,
             "target_id": target_id,
+            "retained_document_ids": retained_document_ids,
             "document_ids": sorted(document_ids),
             "version_ids": sorted(version_ids),
             "generation_job_ids": sorted(generation_job_ids),
@@ -2429,12 +2472,13 @@ class ChatRepository:
                 raise ValueError("deletion plan changed")
             current = self._deletion_impact_locked(
                 target_kind=str(plan["target_kind"]), target_id=str(plan["target_id"]),
-                session_digest=session_digest,
+                session_digest=session_digest, preserve_documents=bool(plan["preserve_documents"]),
             )
             current_json = json.dumps(current, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             if current_json != expected_impact_json:
                 raise ValueError("deletion target changed")
             impact = current
+            self._detach_document_evidence(impact["retained_document_ids"])
             self._delete_ids("chat_document_artifacts", "document_id", impact["document_ids"])
             self._delete_ids("chat_documents", "document_id", impact["document_ids"])
             self._delete_ids("chat_generation_job_events", "job_id", impact["generation_job_ids"])
@@ -2536,6 +2580,17 @@ class ChatRepository:
             f"DELETE FROM {table} WHERE {column} IN ({placeholders})", tuple(values)
         )
 
+    def record_deletion_staging(self, plan_id: str, staged_files_json: str | None) -> None:
+        """Write-ahead journal for file renames before the database commit."""
+        with self._transaction():
+            self._connection.execute("UPDATE chat_deletion_plans SET staged_files_json=? WHERE plan_id=? AND state='planned'",
+                (staged_files_json, plan_id))
+
+    def interrupted_deletion_staging(self) -> tuple[dict[str, object], ...]:
+        with self._lock:
+            return tuple(dict(row) for row in self._connection.execute(
+                "SELECT plan_id,staged_files_json FROM chat_deletion_plans WHERE state='planned' AND staged_files_json IS NOT NULL"))
+
     def complete_deletion_cleanup(self, plan_id: str, *, success: bool) -> None:
         with self._transaction():
             self._connection.execute(
@@ -2554,6 +2609,56 @@ class ChatRepository:
                 """
             ).fetchall()
         return tuple(dict(row) for row in rows)
+
+    def _detach_document_evidence(self, document_ids: list[str]) -> None:
+        from chat_to_howto.domain.generation import GenerationResult
+        for document_id in document_ids:
+            row = self._connection.execute("SELECT source_result_json FROM chat_documents WHERE document_id=?", (document_id,)).fetchone()
+            if row is None:
+                continue
+            source = json.loads(str(row[0]))
+            source["evidence"] = []
+            source["source_extraction_ids"] = []
+            source["result"] = GenerationResult.insufficient().model_dump(mode="json")
+            self._connection.execute("UPDATE chat_documents SET source_result_json=?,source_deleted=1 WHERE document_id=?",
+                (json.dumps(source, ensure_ascii=False, separators=(",", ":")), document_id))
+
+    def raw_retention_targets(self) -> tuple[dict[str, object], ...]:
+        """Ownership survives failed indexing and loss of a job's bound snapshot."""
+        with self._lock:
+            rows = self._connection.execute("""
+                SELECT 'batch' AS target_kind, b.batch_id AS target_id,
+                       COALESCE(m.session_digest,j.session_digest) AS session_digest,
+                       COALESCE(m.created_at_utc,j.created_at_utc,b.created_at_utc) AS created_at_utc
+                FROM chat_export_batches b
+                LEFT JOIN chat_manual_imports m ON m.batch_id=b.batch_id
+                LEFT JOIN chat_export_jobs j ON j.batch_id=b.batch_id OR j.planned_batch_id=b.batch_id
+                WHERE COALESCE(m.session_digest,j.session_digest) IS NOT NULL
+                UNION
+                SELECT 'content_batch',batch_id,session_digest,created_at_utc FROM content_batches
+            """).fetchall()
+            return tuple(dict(row) for row in rows)
+
+    def retire_raw(self, *, target_kind: str, target_id: str, session_digest: str, created_at_utc: str) -> tuple[str, ...]:
+        """Revoke access before touching files; failed disk cleanup remains closed."""
+        with self._transaction():
+            impact = self._deletion_impact_locked(target_kind=target_kind, target_id=target_id,
+                session_digest=session_digest, preserve_documents=True)
+            self._connection.execute("INSERT OR IGNORE INTO chat_raw_retirements VALUES(?,?,?,?)",
+                (target_kind, target_id, session_digest, created_at_utc))
+            self._detach_document_evidence(impact["retained_document_ids"])
+            for job_id in impact["generation_job_ids"]:
+                self._connection.execute("UPDATE chat_generation_jobs SET cancellation_requested=1 WHERE job_id=?", (job_id,))
+            return tuple(impact["generation_job_ids"])
+
+    def retired_export_temp_owners(self) -> tuple[dict[str, object], ...]:
+        # Legacy v1 rows do not identify an approved owner and must be ignored.
+        with self._lock:
+            rows = self._connection.execute("""SELECT j.planned_batch_id AS batch_id,j.scope_json,j.created_at_utc,
+                       NOT EXISTS (SELECT 1 FROM chat_export_batches b WHERE b.batch_id=j.planned_batch_id) AS unbound
+                FROM chat_export_jobs j WHERE j.planned_batch_id IS NOT NULL AND j.session_digest IS NOT NULL
+                  AND j.state IN ('complete','partial','failed','cancelled')""").fetchall()
+            return tuple(dict(row) for row in rows)
 
     def has_active_source_jobs(self, source_id: str) -> bool:
         with self._lock:
@@ -2628,10 +2733,12 @@ class ChatRepository:
                     SELECT snapshot_id, batch_id
                     FROM chat_export_jobs
                     WHERE session_digest = ? AND searchable = 1 AND state = 'complete'
+                      AND NOT EXISTS (SELECT 1 FROM chat_raw_retirements retired WHERE retired.target_kind='batch' AND retired.target_id=chat_export_jobs.batch_id)
                     UNION
                     SELECT snapshot_id, batch_id
                     FROM chat_manual_imports
                     WHERE session_digest = ? AND state = 'complete'
+                      AND NOT EXISTS (SELECT 1 FROM chat_raw_retirements retired WHERE retired.target_kind='batch' AND retired.target_id=chat_manual_imports.batch_id)
                 ), eligible AS (
                     SELECT
                         message.message_id,

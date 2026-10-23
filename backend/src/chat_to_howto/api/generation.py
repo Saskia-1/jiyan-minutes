@@ -28,7 +28,7 @@ from chat_to_howto.services.generation_planning import (
     GenerationSelection,
     MixedGenerationSelection,
 )
-from chat_to_howto.services.topic_expansion import TopicExpansionService, TopicExpansionView
+from chat_to_howto.services.topic_expansion import TopicExpansionService, TopicExpansionView, TopicExpansionPreview
 
 
 _OPAQUE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
@@ -147,6 +147,12 @@ class TopicExpansionRequest(_Request):
     topic: str = Field(min_length=1, max_length=512, repr=False)
 
 
+class TopicExpansionAuthorization(_Request):
+    preview_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    preview_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    confirmed: bool
+
+
 def create_generation_router(
     *,
     get_orchestrator: Callable[[], GenerationJobOrchestrator],
@@ -162,17 +168,31 @@ def create_generation_router(
         route_class=SafeValidationRoute,
     )
 
-    @router.post("/topic-expansion", response_model=TopicExpansionView)
-    def expand_topic(
+    @router.post("/topic-expansion/previews", response_model=TopicExpansionPreview)
+    def preview_topic(
         request: TopicExpansionRequest,
         service: TopicExpansionService = Depends(get_topic_expansion),
         _session_id: str = Depends(require_session),
         _csrf: object = Depends(require_csrf),
-    ) -> TopicExpansionView:
+    ) -> TopicExpansionPreview:
         try:
-            return service.expand(request.topic)
+            return service.create_preview(request.topic, session_id=_session_id)
         except ValueError:
             raise HTTPException(status_code=422, detail="invalid topic") from None
+
+    @router.post("/topic-expansion", response_model=TopicExpansionView)
+    def expand_topic(
+        request: TopicExpansionAuthorization,
+        service: TopicExpansionService = Depends(get_topic_expansion),
+        session_id: str = Depends(require_session),
+        _csrf: object = Depends(require_csrf),
+    ) -> TopicExpansionView:
+        try:
+            return service.expand_authorized(request.preview_id,
+                preview_fingerprint=request.preview_fingerprint, confirmed=request.confirmed,
+                session_id=session_id)
+        except PermissionError:
+            raise HTTPException(status_code=403, detail="topic authorization unavailable") from None
 
     @router.post(
         "/contexts/from-selections", response_model=GenerationContextView,

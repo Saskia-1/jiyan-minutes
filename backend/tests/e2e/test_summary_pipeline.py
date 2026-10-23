@@ -54,9 +54,14 @@ def test_summary_uses_recalled_nonexcluded_messages_and_exports_original_evidenc
     with TestClient(app, base_url=ORIGIN, raise_server_exceptions=False) as client:
         csrf = client.get("/api/session").json()["csrf_token"]
         headers = {"Origin": ORIGIN, "X-CSRF-Token": csrf}
-        expansion = client.post(
-            "/api/generation/topic-expansion", headers=headers, json={"topic": "就业"},
-        )
+        topic_preview = client.post("/api/generation/topic-expansion/previews",
+            headers=headers, json={"topic": "就业"})
+        assert topic_preview.status_code == 200, topic_preview.json()
+        topic_authorization = topic_preview.json()
+        expansion = client.post("/api/generation/topic-expansion", headers=headers, json={
+            "preview_id": topic_authorization["preview_id"],
+            "preview_fingerprint": topic_authorization["preview_fingerprint"], "confirmed": True,
+        })
         assert expansion.status_code == 200, expansion.json()
         assert "求职" in expansion.json()["terms"]
 

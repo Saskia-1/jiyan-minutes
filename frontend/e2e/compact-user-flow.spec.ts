@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./acknowledged-test";
 import { fileURLToPath } from "node:url";
 import { readFile, stat } from "node:fs/promises";
 

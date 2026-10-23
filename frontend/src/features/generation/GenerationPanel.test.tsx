@@ -258,3 +258,35 @@ it("没有已导入 snapshot 时不允许进入生成授权", async () => {
   expect(screen.getByText(/先完成导出与本地导入/)).toBeVisible();
   expect(screen.getByRole("button", { name: "预览 AI 外发" })).toBeDisabled();
 });
+
+it("清理原文立即撤销外发预览，旧预览响应不能恢复授权", async () => {
+  let resolvePreview!: (value: typeof preview) => void;
+  const client = api({ previewGeneration: vi.fn().mockReturnValue(new Promise<typeof preview>(resolve => { resolvePreview = resolve; })) });
+  const { GenerationPanel } = await import("./GenerationPanel");
+  const user = userEvent.setup();
+  render(<GenerationPanel {...props} api={client} />);
+  await user.type(screen.getByLabelText("操作主题"), "合成主题");
+  await user.click(screen.getByRole("button", { name: "预览 AI 外发" }));
+  act(() => { window.dispatchEvent(new Event("minutes-raw-cleared")); });
+  await act(async () => { resolvePreview(preview); });
+  expect(screen.queryByRole("region", { name: "AI 外发预览" })).not.toBeInTheDocument();
+  expect(client.authorizeGeneration).not.toHaveBeenCalled();
+});
+
+it("清理期间旧取消响应即使返回完成结果也不能恢复原文依据", async () => {
+  let resolveCancel!: (value: typeof completeJob) => void;
+  const client = api({ generationJob: vi.fn().mockReturnValue(new Promise(() => undefined)),
+    cancelGeneration: vi.fn().mockReturnValue(new Promise<typeof completeJob>(resolve => { resolveCancel = resolve; })) });
+  const { GenerationPanel } = await import("./GenerationPanel");
+  const user = userEvent.setup();
+  render(<GenerationPanel {...props} api={client} />);
+  await user.type(screen.getByLabelText("操作主题"), "合成主题");
+  await user.click(screen.getByRole("button", { name: "预览 AI 外发" }));
+  await user.click(await screen.findByRole("checkbox", { name: /授权本次向外部 AI 发送/ }));
+  await user.click(screen.getByRole("button", { name: "确认并生成" }));
+  await user.click(await screen.findByRole("button", { name: "取消生成" }));
+  act(() => { window.dispatchEvent(new Event("minutes-raw-cleared")); });
+  await act(async () => { resolveCancel(completeJob); });
+  expect(screen.queryByRole("region", { name: "AI 生成结果" })).not.toBeInTheDocument();
+  expect(screen.queryByText("合成证据原文")).not.toBeInTheDocument();
+});

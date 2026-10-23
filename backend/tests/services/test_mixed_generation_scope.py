@@ -94,7 +94,7 @@ def test_mixed_note_uses_existing_consent_job_provider_and_document_pipeline(tmp
     ])
     provider = FakeProvider()
     settings = GenerationCacheSettings(prompt_version="synthetic", output_schema_version="synthetic", chunk_strategy_version="synthetic", max_chunk_input_tokens=8_000, provider_behavior_revision="synthetic")
-    orchestrator = GenerationJobOrchestrator(repository=chat, provider_factory=lambda _: provider, cache_settings=settings, mixed_search=MixedSearchService(chat, content))
+    orchestrator = GenerationJobOrchestrator(repository=chat, provider_factory=lambda _: provider, cache_settings=settings, clock=lambda: datetime(2026, 10, 12, tzinfo=timezone.utc), mixed_search=MixedSearchService(chat, content))
     try:
         preview = orchestrator.create_mixed_preview(_selection("note-batch", (unit_id,)), session_id="owner")
         assert preview.provider_calls == 1
@@ -106,7 +106,7 @@ def test_mixed_note_uses_existing_consent_job_provider_and_document_pipeline(tmp
         assert provider.call_count == 1
         assert completed.result.schema_version == 2
         assert completed.result.evidence[0].message_id == unit_id
-        document = DocumentService(repository=chat).create_from_generation(job.job_id, session_id="owner")
+        document = DocumentService(repository=chat, clock=lambda: datetime(2026, 10, 12, tzinfo=timezone.utc)).create_from_generation(job.job_id, session_id="owner")
         assert document.source_snapshot_id is None
         assert document.source_refs == (SourceRef(kind="content_batch", id="note-batch"),)
         assert document.source_evidence[0].quote == "合成主题的想法"

@@ -34,7 +34,7 @@ def test_content_batch_plan_deletes_dependent_document_and_private_image_only(tm
             {"unit_id": unit_id, "image_id": "image-a" if images else None, "kind": "note_passage", "group_id": "note-1", "source_order": 0, "text": "合成主题正文", "sender_name": None, "sent_at": None},
         ])
     settings = GenerationCacheSettings(prompt_version="synthetic", output_schema_version="synthetic", chunk_strategy_version="synthetic", max_chunk_input_tokens=8_000, provider_behavior_revision="synthetic")
-    orchestrator = GenerationJobOrchestrator(repository=repo, provider_factory=lambda _: FakeProvider(), cache_settings=settings, mixed_search=MixedSearchService(repo, content))
+    orchestrator = GenerationJobOrchestrator(repository=repo, provider_factory=lambda _: FakeProvider(), cache_settings=settings, clock=lambda: datetime(2026, 10, 12, tzinfo=timezone.utc), mixed_search=MixedSearchService(repo, content))
     selection = MixedGenerationSelection(source_refs=(SourceRef(kind="content_batch", id="batch-a"),), included_unit_ids=(first,), topic="合成主题", mode="complete", summary_type="ideas", include_undated=True,
         start_time=None, end_time=None, provider="fake", model="deterministic", thinking="disabled", reasoning_effort=None,
         redaction_policy_revision="text-only-outbound-v1", budget=GenerationBudget(max_messages=10, max_input_tokens=100_000, max_provider_calls=3))
@@ -46,7 +46,7 @@ def test_content_batch_plan_deletes_dependent_document_and_private_image_only(tm
         consent = orchestrator.issue_consent(preview.preview_id, session_id="owner", confirmed=True)
         job = orchestrator.start_job(consent.consent_id, session_id="owner", idempotency_key="mixed-a")
         assert orchestrator.run_job(job.job_id).state == "complete"
-        document = DocumentService(repository=repo).create_from_generation(job.job_id, session_id="owner")
+        document = DocumentService(repository=repo, clock=lambda: datetime(2026, 10, 12, tzinfo=timezone.utc)).create_from_generation(job.job_id, session_id="owner")
         deletion = DeletionService(repository=repo, approved_roots={"approved-root": root}, private_image_root=private,
             clock=lambda: datetime(2026, 10, 12, tzinfo=timezone.utc))
         plan = deletion.create_plan(target_kind="content_batch", target_id="batch-a", include_managed_files=False, session_id="owner")

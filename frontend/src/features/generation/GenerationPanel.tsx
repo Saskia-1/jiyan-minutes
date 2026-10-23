@@ -108,6 +108,7 @@ export function ResultView({ value, verified = true }: { value: Pick<ValidatedGe
 }
 
 export function GenerationPanel(props: Props) {
+  const rawRevision = useRef(0);
   const [topic, setTopic] = useState("");
   const [mode, setMode] = useState<"fast" | "complete">("complete");
   const [summaryType, setSummaryType] = useState<SummaryType>("how_to");
@@ -130,6 +131,15 @@ export function GenerationPanel(props: Props) {
   const scopeLocked = busy || (!!job && !TERMINAL.has(job.state));
 
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  useEffect(() => {
+    const clear = () => {
+      rawRevision.current += 1; setPreview(null); setConfirmed(false);
+      setJob(value => value?.state === "complete" && value.result
+        ? { ...value, result: { ...value.result, evidence: [] } } : null);
+    };
+    window.addEventListener("minutes-raw-cleared", clear);
+    return () => window.removeEventListener("minutes-raw-cleared", clear);
+  }, []);
   useEffect(() => { if (job?.state === "complete") props.onComplete?.(job.job_id); }, [job?.job_id, job?.state, props.onComplete]);
   useEffect(() => {
     props.onScopeLockChange?.(scopeLocked);
@@ -145,9 +155,11 @@ export function GenerationPanel(props: Props) {
   }
 
   async function poll(jobId: string) {
+    const requestedScope = currentScopeKey.current;
+    const revision = rawRevision.current;
     for (let attempt = 0; alive.current; attempt++) {
       const value = await props.api.generationJob(jobId);
-      if (!alive.current) return value;
+      if (!alive.current || currentScopeKey.current !== requestedScope || revision !== rawRevision.current) return value;
       setJob(value);
       if (TERMINAL.has(value.state)) return value;
       await new Promise(resolve => setTimeout(resolve, Math.min(4_000, 300 * (2 ** attempt))));
@@ -156,6 +168,7 @@ export function GenerationPanel(props: Props) {
 
   async function quickPreview() {
     if ((!props.prepareSelection && !props.preparePreview) || scopeLocked || props.disabled) return;
+    const revision = rawRevision.current;
     const requestedScope = scopeKey;
     setBusy(true); setError(""); setPreview(null); setJob(null); setConfirmed(false);
     try {
@@ -163,7 +176,7 @@ export function GenerationPanel(props: Props) {
         ? await props.preparePreview()
         : await props.api.previewGeneration(await props.prepareSelection!());
       if (Date.parse(value.expires_at) <= Date.now()) throw new Error("preview_expired");
-      if (alive.current && currentScopeKey.current === requestedScope) setPreview(value);
+      if (alive.current && currentScopeKey.current === requestedScope && revision === rawRevision.current) setPreview(value);
     } catch {
       if (alive.current) setError("无法建立 AI 外发预览；没有发送正文。请检查所选范围后重试。");
     } finally { if (alive.current) setBusy(false); }
@@ -172,6 +185,7 @@ export function GenerationPanel(props: Props) {
   async function createPreview() {
     if (!props.snapshotId || !topicValue.trim() || !props.conversationSelectionIds.length || busy || props.disabled ||
         (hasRetrievedScope && !props.includedMessageIds?.length)) return;
+    const revision = rawRevision.current;
     const requestedScopeKey = scopeKey;
     setBusy(true); setError(""); setPreview(null); setConfirmed(false); setJob(null);
     try {
@@ -187,22 +201,23 @@ export function GenerationPanel(props: Props) {
         } : {}),
       });
       if (Date.parse(value.expires_at) <= Date.now()) throw new Error("preview_expired");
-      if (alive.current && currentScopeKey.current === requestedScopeKey) setPreview(value);
+      if (alive.current && currentScopeKey.current === requestedScopeKey && revision === rawRevision.current) setPreview(value);
     } catch { if (alive.current) setError("无法建立 AI 外发预览；没有发送聊天内容。"); }
     finally { if (alive.current) setBusy(false); }
   }
 
   async function begin() {
     if (!preview || !confirmed || busy || props.disabled) return;
+    const revision = rawRevision.current;
     const authorizedScopeKey = scopeKey;
     setBusy(true); setError("");
     try {
       const consent = await props.api.authorizeGeneration(preview.preview_id);
       if (Date.parse(consent.expires_at) <= Date.now() || consent.scope_fingerprint !== preview.scope_fingerprint ||
           consent.outbound_authorized !== preview.will_send_external) throw new Error("consent_mismatch");
-      if (!alive.current || currentScopeKey.current !== authorizedScopeKey) return;
+      if (!alive.current || currentScopeKey.current !== authorizedScopeKey || revision !== rawRevision.current) return;
       const started = await props.api.startGeneration(consent.consent_id, `ui-${crypto.randomUUID()}`);
-      if (!alive.current) return;
+      if (!alive.current || currentScopeKey.current !== authorizedScopeKey || revision !== rawRevision.current) return;
       setJob(started); setConfirmed(false); setBusy(false);
       if (!TERMINAL.has(started.state)) await poll(started.job_id);
     } catch { if (alive.current) setError("生成未完成；聊天范围不会自动扩大或改用其他服务。保持当前页面可重试。"); }
@@ -212,17 +227,23 @@ export function GenerationPanel(props: Props) {
   async function cancel() {
     if (!job || TERMINAL.has(job.state) || busy) return;
     setBusy(true); setError("");
-    try { if (alive.current) setJob(await props.api.cancelGeneration(job.job_id)); }
+    const revision = rawRevision.current;
+    const requestedScope = currentScopeKey.current;
+    try {
+      const value = await props.api.cancelGeneration(job.job_id);
+      if (alive.current && revision === rawRevision.current && requestedScope === currentScopeKey.current) setJob(value);
+    }
     catch { if (alive.current) setError("取消状态未能确认；不会自动重新发送。" ); }
     finally { if (alive.current) setBusy(false); }
   }
 
   async function retry() {
     if (!job || job.state !== "failed" || busy) return;
+    const revision = rawRevision.current;
     setBusy(true); setError("");
     try {
       const value = await props.api.retryGeneration(job.job_id);
-      if (!alive.current) return;
+      if (!alive.current || revision !== rawRevision.current) return;
       setJob(value); setBusy(false);
       if (!TERMINAL.has(value.state)) await poll(value.job_id);
     } catch { if (alive.current) setError("重试未完成；冻结的聊天范围没有改变。" ); }

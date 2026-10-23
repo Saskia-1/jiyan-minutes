@@ -49,9 +49,30 @@ def test_topic_expansion_falls_back_to_original_term_when_provider_unavailable(p
     p0.start()
     p0.bootstrap()
 
-    response = p0.request(
-        "POST", "/api/generation/topic-expansion", json={"topic": "就业"}
-    )
+    preview = p0.request("POST", "/api/generation/topic-expansion/previews",
+        json={"topic": "就业"})
+    assert preview.status_code == 200
+    approved = preview.json()
+    response = p0.request("POST", "/api/generation/topic-expansion", json={
+        "preview_id": approved["preview_id"],
+        "preview_fingerprint": approved["preview_fingerprint"], "confirmed": True,
+    })
 
     assert response.status_code == 200
     assert response.json() == {"topic": "就业", "terms": ["就业"], "degraded": True}
+
+
+def test_topic_expansion_api_rejects_direct_dispatch_and_reused_authorization(p0) -> None:
+    p0.start()
+    p0.bootstrap()
+    direct = p0.request("POST", "/api/generation/topic-expansion", json={"topic": "就业"})
+    assert direct.status_code == 422
+    preview = p0.request("POST", "/api/generation/topic-expansion/previews",
+        json={"topic": "联系 13800138000 讨论就业"}).json()
+    assert "13800138000" not in preview["outbound_text"]
+    body = {"preview_id": preview["preview_id"],
+        "preview_fingerprint": preview["preview_fingerprint"], "confirmed": False}
+    assert p0.request("POST", "/api/generation/topic-expansion", json=body).status_code == 403
+    body["confirmed"] = True
+    assert p0.request("POST", "/api/generation/topic-expansion", json=body).status_code == 200
+    assert p0.request("POST", "/api/generation/topic-expansion", json=body).status_code == 403

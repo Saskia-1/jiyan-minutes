@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiError, type LocalApiClient } from "../../api/client";
 import type { ContentBatch, ContentPreview, ContentUnitEdit } from "../../types";
 import { DeletionControl } from "../data/DeletionControl";
@@ -27,6 +27,8 @@ const errorLabels: Record<string, string> = {
 export function ContentImportPanel({ api, busy, onCommitted }: {
   api: LocalApiClient; busy: boolean; onCommitted: (batch: ContentBatch) => void;
 }) {
+  const rawRevision = useRef(0);
+  const [rawEpoch, setRawEpoch] = useState(0);
   const [mode, setMode] = useState<"images" | "paste_note">("images");
   const [files, setFiles] = useState<File[]>([]);
   const [note, setNote] = useState("");
@@ -43,12 +45,22 @@ export function ContentImportPanel({ api, busy, onCommitted }: {
   const locked = busy || working;
 
   useEffect(() => {
+    const clear = () => {
+      rawRevision.current += 1;
+      setPreview(null); setEdits([]); setImageOrders([]); setConfirmed(false); setFiles([]); setNote("");
+      setBatches([]); setCursor(null); setRawEpoch(value => value + 1);
+    };
+    window.addEventListener("minutes-raw-cleared", clear);
+    return () => window.removeEventListener("minutes-raw-cleared", clear);
+  }, []);
+
+  useEffect(() => {
     let active = true;
     void api.recoverContentBatches(null).then(page => {
       if (active) { setBatches(page.items); setCursor(page.next_cursor); }
     }).catch(() => { if (active) setError("无法恢复已导入的截图或笔记；未更改本地数据。"); });
     return () => { active = false; };
-  }, [api]);
+  }, [api, rawEpoch]);
 
   function clearPreview() {
     setPreview(null); setEdits([]); setImageOrders([]); setConfirmed(false); setDirty(false); setError("");
@@ -64,6 +76,7 @@ export function ContentImportPanel({ api, busy, onCommitted }: {
     } else if (!note.trim() || new TextEncoder().encode(note).byteLength > MAX_NOTE) {
       setError("笔记正文不能为空，且不能超过 1 MiB。"); return;
     }
+    const revision = rawRevision.current;
     setWorking(true); setError(""); setConfirmed(false);
     try {
       const value = mode === "images"
@@ -71,6 +84,7 @@ export function ContentImportPanel({ api, busy, onCommitted }: {
           filename: file.name, payload_base64: encode(await file.arrayBuffer()), input_order: index,
         }))) })
         : await api.previewContentImport({ pasted_note: note });
+      if (revision !== rawRevision.current) return;
       setPreview(value);
       setEdits(value.units.map(unit => ({ unit_id: unit.unit_id, kind: unit.kind, group_id: unit.group_id,
         text: unit.text, sender_name: unit.sender_name, sent_at: unit.sent_at, order: unit.order })));
@@ -89,9 +103,11 @@ export function ContentImportPanel({ api, busy, onCommitted }: {
 
   async function saveCorrection() {
     if (!preview || locked || !edits.length || edits.some(item => !item.text.trim())) return;
+    const revision = rawRevision.current;
     setWorking(true); setError(""); setConfirmed(false);
     try {
       const value = await api.reviseContentPreview(preview.preview_id, edits, imageOrders);
+      if (revision !== rawRevision.current) return;
       setPreview(value);
       setEdits(value.units.map(unit => ({ unit_id: unit.unit_id, kind: unit.kind, group_id: unit.group_id,
         text: unit.text, sender_name: unit.sender_name, sent_at: unit.sent_at, order: unit.order })));
@@ -103,9 +119,11 @@ export function ContentImportPanel({ api, busy, onCommitted }: {
 
   async function commit() {
     if (!preview || preview.status !== "ready" || dirty || !confirmed || locked) return;
+    const revision = rawRevision.current;
     setWorking(true); setError("");
     try {
       const batch = await api.commitContentPreview(preview.preview_id, preview.preview_fingerprint);
+      if (revision !== rawRevision.current) return;
       setBatches(current => [batch, ...current.filter(item => item.batch_id !== batch.batch_id)]);
       onCommitted(batch); clearPreview();
     } catch { setError("导入未完成；请确认当前预览仍有效。不会自动重试。"); }
@@ -114,9 +132,11 @@ export function ContentImportPanel({ api, busy, onCommitted }: {
 
   async function loadMore() {
     if (!cursor || historyBusy || locked) return;
+    const revision = rawRevision.current;
     setHistoryBusy(true);
     try {
       const page = await api.recoverContentBatches(cursor);
+      if (revision !== rawRevision.current) return;
       setBatches(current => [...current, ...page.items.filter(item => !current.some(existing => existing.batch_id === item.batch_id))]);
       setCursor(page.next_cursor);
     } catch { setError("无法继续恢复较早的导入批次。"); }
@@ -173,7 +193,8 @@ export function ContentImportPanel({ api, busy, onCommitted }: {
     <section aria-label="已导入截图或笔记"><h3>已导入截图或笔记</h3>
       {!batches.length && <p>还没有已确认的截图或笔记。</p>}
       {batches.map(item => <div key={item.batch_id}><p>已导入 {item.unit_count} 条正文 · {item.image_count} 张截图</p>
-        <DeletionControl api={api} targetKind="content_batch" targetId={item.batch_id}
+        {item.raw_expires_at_utc && <p className="muted">原文保留至 {new Date(item.raw_expires_at_utc).toLocaleString("zh-CN")}，文档与版本长期保留。</p>}
+        <DeletionControl preserveDocuments api={api} targetKind="content_batch" targetId={item.batch_id}
           label="删除这次截图／笔记导入" disabled={locked}
           onDeleted={() => setBatches(current => current.filter(batch => batch.batch_id !== item.batch_id))} />
       </div>)}

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
 import type { LocalApiClient } from "../../api/client";
@@ -64,4 +64,21 @@ it("读取最新版本失败时报告错误，不把列表缓存当作最新文�
   expect(await screen.findByRole("alert")).toHaveTextContent("最新版本");
   expect(screen.queryByRole("textbox", { name: "文档标题" })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "打开最新版本" })).toBeEnabled();
+});
+
+it("清理期间返回的旧文档响应保留版本但不能复活原始依据", async () => {
+  let resolveOpen!: (value: HowToDocument) => void;
+  const api = { recoverDocuments: vi.fn().mockResolvedValue({ documents: [document], next_cursor: null }),
+    document: vi.fn().mockReturnValue(new Promise<HowToDocument>(resolve => { resolveOpen = resolve; })),
+  } as unknown as LocalApiClient;
+  const { DocumentLibrary } = await import("./DocumentLibrary");
+  const user = userEvent.setup();
+  render(<DocumentLibrary api={api} outputRootId="" />);
+  await user.click(await screen.findByRole("button", { name: "打开最新版本" }));
+  await act(async () => {
+    window.dispatchEvent(new Event("minutes-raw-cleared"));
+    resolveOpen(document);
+  });
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "文档标题" })).toHaveValue("指南 version 2"));
+  expect(screen.queryByText("证据", { exact: true })).not.toBeInTheDocument();
 });

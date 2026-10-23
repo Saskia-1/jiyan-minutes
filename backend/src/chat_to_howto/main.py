@@ -45,6 +45,7 @@ from chat_to_howto.services.artifacts import ApprovedOutputRoot, ArtifactWriter
 from chat_to_howto.services.documents import DocumentService
 from chat_to_howto.services.document_export import DocumentExportService
 from chat_to_howto.services.deletion import DeletionService
+from chat_to_howto.services.retention import RetentionService
 from chat_to_howto.services.export_jobs import (
     AuthorizationError,
     ExportJobOrchestrator,
@@ -277,6 +278,7 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
         clock=clock,
         max_daily_provider_requests=settings.llm_daily_request_limit,
         mixed_search=mixed_search,
+        retention_sweep=lambda: app.state.retention_service.sweep(),
     )
     topic_expansion_service = TopicExpansionService(
         provider_factory=selected_generation_provider_factory,
@@ -294,8 +296,12 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
     deletion_service = DeletionService(
         repository=chat_repository, approved_roots=approved_p1_roots, clock=clock,
         private_image_root=database.path.with_name(f"{database.path.stem}.content-images"),
+        cancel_generation_jobs=generation_orchestrator.revoke_jobs,
     )
-    deletion_service.reconcile_cleanup()
+    content_imports.reconcile_orphan_images()
+    retention_service = RetentionService(repository=chat_repository, deletion=deletion_service, clock=clock)
+    retention_service.sweep()
+    app.state.retention_service = retention_service
     app.state.chat_repository = chat_repository
     app.state.export_orchestrator = export_orchestrator
     app.state.chat_search = chat_search
@@ -364,6 +370,11 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
                     return error(413)
                 body.extend(chunk)
             request._body = bytes(body)
+        retention_service.sweep()
+        if retention_service.pending_count and request.url.path.startswith((
+            "/api/search", "/api/mixed-search", "/api/generation", "/api/imports", "/api/content-imports", "/api/export"
+        )):
+            return error(503)
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
         return response
@@ -415,6 +426,10 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
         response = JSONResponse({"csrf_token": csrf, "expires_at": Database.now_text(expiry)})
         response.set_cookie("p0_session", token, httponly=True, samesite="strict", path="/")
         return response
+
+    @app.get("/api/retention")
+    async def retention_status():
+        return {"cleaned_batches": retention_service.cleaned_count, "pending_cleanups": retention_service.pending_count}
 
     @app.get("/api/environment")
     async def environment():

@@ -7,8 +7,8 @@
 secrets/
 
 # Local application data and database files
-data/
-exports/
+/data/
+/exports/
 *.db
 *.sqlite
 *.sqlite3
@@ -37,5 +37,7 @@ __pycache__/
 backend/.venv/
 frontend/node_modules/
 frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
 backend/native/ocr/build/
 third_party_state/

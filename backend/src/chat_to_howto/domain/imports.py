@@ -196,6 +196,9 @@ class ImportCommitView(BaseModel):
     import_id: str
     batch_id: str
     snapshot_id: str
+    raw_expires_at_utc: datetime | None = None
+    imported_count: int = Field(default=0, ge=0)
+    skipped_count: int = Field(default=0, ge=0)
     source_id: Literal["manual"] = "manual"
     account_id: str
     range_start: datetime

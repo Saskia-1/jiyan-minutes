@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, type LocalApiClient } from "../../api/client";
 import type {
   Conversation, ImportCommit, ImportOptions, ImportPlatformHint, ImportPreview,
@@ -47,6 +47,8 @@ function importedConversations(value: ImportCommit): Conversation[] {
 }
 
 export function ChatImportPanel({ api, outputRootId, compact = false }: { api: LocalApiClient; outputRootId: string; compact?: boolean }) {
+  const rawRevision = useRef(0);
+  const [rawEpoch, setRawEpoch] = useState(0);
   const [origin, setOrigin] = useState<"imported_file" | "paste">("imported_file");
   const [platform, setPlatform] = useState<ImportPlatformHint>("generic");
   const [file, setFile] = useState<File | null>(null);
@@ -59,6 +61,7 @@ export function ChatImportPanel({ api, outputRootId, compact = false }: { api: L
   const [mappingDirty, setMappingDirty] = useState(false);
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [confirmed, setConfirmed] = useState(false);
+  const [acceptSkipped, setAcceptSkipped] = useState(false);
   const [committed, setCommitted] = useState<ImportCommit | null>(null);
   const [imports, setImports] = useState<ImportCommit[]>([]);
   const [nextImportCursor, setNextImportCursor] = useState<string | null>(null);
@@ -70,6 +73,17 @@ export function ChatImportPanel({ api, outputRootId, compact = false }: { api: L
   const [error, setError] = useState("");
   const conversations = useMemo(() => committed ? importedConversations(committed) : [], [committed]);
   const importLocked = busy || generationScopeLocked;
+
+  useEffect(() => {
+    const clear = () => {
+      rawRevision.current += 1;
+      setPreview(null); setConfirmed(false); setAcceptSkipped(false); setPastedText(""); setFile(null); setImports([]);
+      setCommitted(value => value ? { ...value, analysis: undefined } : value);
+      setRawEpoch(value => value + 1);
+    };
+    window.addEventListener("minutes-raw-cleared", clear);
+    return () => window.removeEventListener("minutes-raw-cleared", clear);
+  }, []);
 
   useEffect(() => {
     let current = true;
@@ -86,13 +100,15 @@ export function ChatImportPanel({ api, outputRootId, compact = false }: { api: L
     }).catch(() => { if (current) setHistoryError("无法恢复已导入批次；未更改本地数据。"); })
       .finally(() => { if (current) setHistoryBusy(false); });
     return () => { current = false; };
-  }, [api]);
+  }, [api, rawEpoch]);
 
   async function loadMoreImports() {
     if (!nextImportCursor || historyBusy || importLocked) return;
+    const revision = rawRevision.current;
     setHistoryBusy(true); setHistoryError("");
     try {
       const page = await api.recoverImports(nextImportCursor);
+      if (revision !== rawRevision.current) return;
       setImports(existing => [
         ...existing,
         ...page.imports.filter(item => !existing.some(found => found.import_id === item.import_id)),
@@ -104,12 +120,12 @@ export function ChatImportPanel({ api, outputRootId, compact = false }: { api: L
 
   function removeImported(item: ImportCommit) {
     setImports(existing => existing.filter(value => value.import_id !== item.import_id));
-    setCommitted(existing => existing?.import_id === item.import_id ? null : existing);
-    setPreview(null); setConfirmed(false); setGenerationScopeLocked(false);
+    setCommitted(existing => existing?.import_id === item.import_id ? { ...existing, analysis: undefined } : existing);
+    setPreview(null); setConfirmed(false); setAcceptSkipped(false); setGenerationScopeLocked(false);
   }
 
   function invalidatePreview(clearMapping = false) {
-    setPreview(null); setConfirmed(false); setMappingDirty(false); setError("");
+    setPreview(null); setConfirmed(false); setAcceptSkipped(false); setMappingDirty(false); setError("");
     if (clearMapping) setMapping({});
   }
 
@@ -119,7 +135,8 @@ export function ChatImportPanel({ api, outputRootId, compact = false }: { api: L
       setError("文件超过 64 MiB 导入上限，未读取或写入。");
       return;
     }
-    setBusy(true); setError(""); setConfirmed(false);
+    const revision = rawRevision.current;
+    setBusy(true); setError(""); setConfirmed(false); setAcceptSkipped(false);
     try {
       const options: ImportOptions = {
         timezone,
@@ -132,6 +149,7 @@ export function ChatImportPanel({ api, outputRootId, compact = false }: { api: L
         ? await api.previewImport({ origin, platform_hint: platform, pasted_text: pastedText, options })
         : await api.previewImport({ origin, platform_hint: platform, filename: file!.name,
           payload_base64: bytesToBase64(await file!.arrayBuffer()), options });
+      if (revision !== rawRevision.current) return;
       setPreview(value); setMapping(value.applied_mapping); setMappingDirty(false);
     } catch (caught) {
       const guidance = caught instanceof ApiError && caught.code ? PREVIEW_ERRORS[caught.code] : null;
@@ -141,12 +159,14 @@ export function ChatImportPanel({ api, outputRootId, compact = false }: { api: L
   }
 
   async function commit() {
-    if (!preview || !preview.ready_to_commit || mappingDirty || !confirmed || importLocked) return;
+    if (!preview || !preview.ready_to_commit || mappingDirty || !confirmed || importLocked || preview.analysis.parsed_count === 0 || (preview.analysis.unresolved_count > 0 && !acceptSkipped)) return;
+    const revision = rawRevision.current;
     setBusy(true); setError("");
     try {
-      const value = await api.commitImport(preview.preview_id, preview.preview_fingerprint);
+      const value = await api.commitImport(preview.preview_id, preview.preview_fingerprint, ...(preview.analysis.unresolved_count > 0 ? [acceptSkipped] as const : []));
+      if (revision !== rawRevision.current) return;
       setImports(existing => [value, ...existing.filter(item => item.import_id !== value.import_id)]);
-      setCommitted(value); setPreview(null); setConfirmed(false);
+      setCommitted(value); setPreview(null); setConfirmed(false); setAcceptSkipped(false);
     } catch { setError("导入未完成；预览内容没有自动重试。"); }
     finally { setBusy(false); }
   }
@@ -157,7 +177,7 @@ export function ChatImportPanel({ api, outputRootId, compact = false }: { api: L
       if (source) next[target] = source; else delete next[target];
       return next;
     });
-    setMappingDirty(true); setConfirmed(false);
+    setMappingDirty(true); setConfirmed(false); setAcceptSkipped(false);
   }
 
   const OptionsContainer = compact ? "details" : "div";
@@ -213,10 +233,13 @@ export function ChatImportPanel({ api, outputRootId, compact = false }: { api: L
         <li key={item.row_number}><strong>{item.sender_name || "未知发送者"}</strong> · <time dateTime={item.timestamp || undefined}>{item.timestamp || "时间未知"}</time><p>{item.text ?? "[非文本消息]"}</p></li>)}</ol></HistoryContainer>}
       {!!preview.analysis.warnings.length && <OptionsContainer>{compact && <summary>导入说明</summary>}<div className="warning"><strong>提醒</strong><ul>{preview.analysis.warnings.map(item => <li key={item}><code>{item}</code></li>)}</ul></div></OptionsContainer>}
       {!!preview.analysis.issues.length && <div className="warning"><strong>未解析行</strong><ul>{preview.analysis.issues.map((item, index) =>
-        <li key={`${item.row_number}-${item.code}-${index}`}>第 {item.row_number} 行：<code>{item.code}</code></li>)}</ul></div>}
-      <label className="check"><input type="checkbox" checked={confirmed} disabled={importLocked || mappingDirty || !preview.ready_to_commit}
+        <li key={`${item.row_number}-${item.code}-${index}`}>第 {item.row_number} 条记录：{["invalid_text", "message_invalid"].includes(item.code) ? "消息正文为空或格式无效" : item.code === "timestamp_unresolved" ? "发送时间格式无效" : item.code === "conversation_unresolved" ? "会话信息缺失或格式无效" : "记录格式无效，请核对原文件"}</li>)}</ul></div>}
+      {preview.analysis.unresolved_count > 0 && <label className="check"><input type="checkbox" checked={acceptSkipped}
+        disabled={importLocked || mappingDirty || !preview.ready_to_commit || preview.analysis.parsed_count === 0}
+        onChange={event => { setAcceptSkipped(event.target.checked); setConfirmed(false); }} />接受跳过 {preview.analysis.unresolved_count} 条未解析记录，仅导入 {preview.analysis.parsed_count} 条有效记录</label>}
+      <label className="check"><input type="checkbox" checked={confirmed} disabled={importLocked || mappingDirty || !preview.ready_to_commit || preview.analysis.parsed_count === 0 || (preview.analysis.unresolved_count > 0 && !acceptSkipped)}
         onChange={event => setConfirmed(event.target.checked)} />确认按此预览导入；来源完整性不会被推断</label>
-      <button type="button" disabled={importLocked || mappingDirty || !preview.ready_to_commit || !confirmed}
+      <button type="button" disabled={importLocked || mappingDirty || !preview.ready_to_commit || !confirmed || preview.analysis.parsed_count === 0 || (preview.analysis.unresolved_count > 0 && !acceptSkipped)}
         onClick={() => void commit()}>确认导入本地索引</button>
     </section>}
     <HistoryContainer aria-label="已导入批次">
@@ -225,10 +248,12 @@ export function ChatImportPanel({ api, outputRootId, compact = false }: { api: L
       {!imports.length && !historyBusy && <p>当前会话还没有已导入批次。</p>}
       {imports.map((item, index) => <section key={item.import_id} aria-label={`已导入批次 ${index + 1}`}>
         <p>{item.conversations.map(value => value.display_name || "未命名会话").join("、")}{!compact && ` · ${item.range_start} 至 ${item.range_end}`}</p>
+        {item.imported_count !== undefined && <p>已导入 {item.imported_count} 条有效记录，已跳过 {item.skipped_count ?? 0} 条未解析记录。</p>}
+        {item.raw_expires_at_utc && <p className="muted">原文保留至 {new Date(item.raw_expires_at_utc).toLocaleString("zh-CN")}，文档与版本长期保留。</p>}
         <button type="button" disabled={importLocked} onClick={() => setCommitted(item)}>
           {committed?.import_id === item.import_id ? "当前已打开" : "打开搜索与整理"}
         </button>
-        <DeletionControl api={api} targetKind="batch" targetId={item.batch_id}
+        <DeletionControl preserveDocuments api={api} targetKind="batch" targetId={item.batch_id}
           label={committed?.import_id === item.import_id ? "删除这次导入及本地索引" : `删除已导入批次 ${index + 1}`}
           disabled={importLocked} onDeleted={() => removeImported(item)} />
       </section>)}
@@ -242,7 +267,7 @@ export function ChatImportPanel({ api, outputRootId, compact = false }: { api: L
     sourceControls={importControls} outputRootId={outputRootId} importBusy={busy} onScopeLockChange={setGenerationScopeLocked} />;
   return <section className="panel import-panel" aria-label="导入聊天记录">
     {importControls}
-    {committed && <>
+    {committed && imports.some(item => item.import_id === committed.import_id) && <>
       <p role="status">导入完成：{conversations.length} 个会话已进入本地索引。</p>
       <ChatSearchPanel api={api} sourceId="manual" account={committed.account_id} conversations={conversations}
         rangeStart={committed.range_start} rangeEnd={committed.range_end} timezone={committed.display_timezone}

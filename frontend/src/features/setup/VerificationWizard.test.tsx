@@ -171,6 +171,9 @@ it("简洁首页共享一个 session，默认不连接 QQ/微信来源", async (
   const { default: App } = await loadSubject("App");
   const api = installApi(); vi.stubGlobal("fetch", api.fetch);
   render(<App />);
+  const acknowledgment = userEvent.setup();
+  await acknowledgment.click(screen.getByRole("checkbox", { name: "我已知悉" }));
+  await acknowledgment.click(screen.getByRole("button", { name: "继续使用" }));
   await screen.findByRole("region", { name: "聊天内容" });
   await waitFor(() => expect(api.requests.filter(item => item.path === "/api/imports/recovery")).toHaveLength(1));
   expect(api.requests.filter(item => item.path === "/api/sources")).toHaveLength(0);
@@ -619,6 +622,9 @@ it("App 保留同源配置，首页四区且文件导入只通过系统选择器
   const { default: App } = await loadSubject("App");
   const api = installApi(); vi.stubGlobal("fetch", api.fetch);
   render(<App />);
+  const acknowledgment = userEvent.setup();
+  await acknowledgment.click(screen.getByRole("checkbox", { name: "我已知悉" }));
+  await acknowledgment.click(screen.getByRole("button", { name: "继续使用" }));
   await screen.findByRole("region", { name: "聊天内容" });
   expect(api.requests.some(item => item.path === "/api/setup-options")).toBe(true);
   expect(screen.getAllByRole("heading", { level: 2 }).map(item => item.textContent)).toEqual([
@@ -636,6 +642,9 @@ it("浏览器下载无需批准输出目录，首页不擅自替换服务端根�
   const api = installApi(); api.state.setupOptions.approved_output_roots = [];
   vi.stubGlobal("fetch", api.fetch);
   render(<App />);
+  const acknowledgment = userEvent.setup();
+  await acknowledgment.click(screen.getByRole("checkbox", { name: "我已知悉" }));
+  await acknowledgment.click(screen.getByRole("button", { name: "继续使用" }));
   expect(await screen.findByRole("region", { name: "聊天内容" })).toBeVisible();
   expect(screen.getByRole("button", { name: "开始整理" })).toBeDisabled();
   expect(api.requests.some(item => item.path.endsWith("/verification-jobs"))).toBe(false);

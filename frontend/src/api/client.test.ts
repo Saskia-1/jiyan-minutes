@@ -637,3 +637,36 @@ it("断开来源与删除数据都要明确确认，并严格解析影响清单"
   ]);
   expect(requests.filter(item => item.method === "POST").every(item => item.headers.get("X-CSRF-Token") === "csrf-1")).toBe(true);
 });
+
+it("原文保留状态只接受公开非负计数", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = new URL(asRequest(input, init).url).pathname;
+    if (path === "/api/session") return json({ csrf_token: "csrf-1", expires_at: "2099-01-01T00:00:00Z" });
+    return json({ cleaned_batches: 2, pending_cleanups: 1 });
+  }));
+  expect(await createClient().retentionStatus()).toEqual({ cleaned_batches: 2, pending_cleanups: 1 });
+});
+
+it.each([true, false])("主题扩展每次预览完整脱敏主题并独立授权（接受：%s）", async accepted => {
+  const calls: Request[] = [];
+  const confirm = vi.fn().mockReturnValue(accepted);
+  vi.stubGlobal("confirm", confirm);
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = asRequest(input, init); calls.push(request.clone());
+    const path = new URL(request.url).pathname;
+    if (path === "/api/session") return json({ csrf_token: "csrf-1", expires_at: "2099-01-01T00:00:00Z" });
+    if (path.endsWith("/previews")) return json({ preview_id: "topic-preview:1", topic: "合成主题", outbound_text: "完整脱敏主题",
+      preview_fingerprint: "a".repeat(64), model: "synthetic-model", expires_at_utc: "2099-01-01T00:00:00Z" });
+    return json({ topic: "合成主题", terms: ["合成主题", "关键词"], degraded: false });
+  }));
+  const result = await createClient().expandTopic("合成主题");
+  expect(confirm).toHaveBeenCalledOnce();
+  expect(confirm.mock.calls[0][0]).toContain("完整脱敏主题");
+  expect(confirm.mock.calls[0][0]).toContain("synthetic-model");
+  const executions = calls.filter(request => new URL(request.url).pathname.endsWith("/topic-expansion"));
+  expect(executions).toHaveLength(accepted ? 1 : 0);
+  if (accepted) {
+    expect(await executions[0].json()).toEqual({ preview_id: "topic-preview:1", preview_fingerprint: "a".repeat(64), confirmed: true });
+    expect(result.degraded).toBe(false);
+  } else expect(result).toEqual({ topic: "合成主题", terms: ["合成主题"], degraded: true });
+});

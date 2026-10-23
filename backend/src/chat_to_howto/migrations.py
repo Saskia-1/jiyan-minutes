@@ -1353,6 +1353,27 @@ _MIGRATION_14 = (
 )
 
 
+_MIGRATION_15 = (
+    """CREATE TABLE chat_documents_retained (
+        document_id TEXT PRIMARY KEY,
+        session_digest TEXT NOT NULL CHECK (length(session_digest)=64 AND session_digest NOT GLOB '*[^0-9a-f]*'),
+        source_generation_job_id TEXT NOT NULL UNIQUE,
+        current_version_id TEXT NOT NULL, source_result_json TEXT NOT NULL,
+        created_at_utc TEXT NOT NULL, updated_at_utc TEXT NOT NULL,
+        source_deleted INTEGER NOT NULL DEFAULT 0 CHECK (source_deleted IN (0,1))
+    )""",
+    "INSERT INTO chat_documents_retained SELECT *, 0 FROM chat_documents",
+    "DROP TABLE chat_documents",
+    "ALTER TABLE chat_documents_retained RENAME TO chat_documents",
+    "CREATE INDEX idx_chat_documents_session ON chat_documents(session_digest, updated_at_utc)",
+    "ALTER TABLE chat_deletion_plans ADD COLUMN preserve_documents INTEGER NOT NULL DEFAULT 0 CHECK (preserve_documents IN (0,1))",
+    """CREATE TABLE chat_raw_retirements (
+        target_kind TEXT NOT NULL, target_id TEXT NOT NULL, session_digest TEXT NOT NULL,
+        created_at_utc TEXT NOT NULL, PRIMARY KEY(target_kind, target_id)
+    )""",
+)
+
+
 MigrationAction = tuple[str, ...] | Callable[[sqlite3.Connection], None]
 MIGRATIONS: tuple[tuple[int, MigrationAction], ...] = (
     (1, _MIGRATION_1),
@@ -1369,6 +1390,7 @@ MIGRATIONS: tuple[tuple[int, MigrationAction], ...] = (
     (12, _MIGRATION_12),
     (13, _MIGRATION_13),
     (14, _MIGRATION_14),
+    (15, _MIGRATION_15),
 )
 
 

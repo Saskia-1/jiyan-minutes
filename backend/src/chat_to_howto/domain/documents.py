@@ -33,6 +33,7 @@ class DocumentVersion(_FrozenModel):
 class HowToDocument(_FrozenModel):
     document_id: str
     source_generation_job_id: str
+    source_deleted: bool = False
     source_snapshot_id: str | None
     source_refs: tuple[SourceRef, ...] = Field(default=(), exclude_if=lambda value: not value)
     created_at: datetime

@@ -1,4 +1,5 @@
-import { test, expect } from "@playwright/test";
+// Component integration harness: retained UI with the real synthetic backend.
+import { test, expect } from "./acknowledged-test";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -27,7 +28,7 @@ test("窄范围合成导出通过真实后端落盘，360px 与键盘可用，�
   const leaked: string[] = [];
   page.on("console", event => { if (/合成记录，仅用于本地测试|group:synthetic-/.test(event.text())) leaked.push("console"); });
   page.on("pageerror", event => { if (/合成记录，仅用于本地测试|group:synthetic-/.test(event.message)) leaked.push("pageerror"); });
-  await page.goto("/");
+  await page.goto("/e2e/component-harness.html");
   const sourceChoice = page.getByRole("combobox", { name: "数据源" });
   await expect(sourceChoice).toBeVisible();
   for (let index = 0; index < 12 && !(await sourceChoice.evaluate(element => element === document.activeElement)); index++) await page.keyboard.press("Tab");

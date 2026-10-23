@@ -1,4 +1,5 @@
-import { test, expect, type Response } from "@playwright/test";
+// Component integration harness: retained UI with the real synthetic backend.
+import { test, expect, type Response } from "./acknowledged-test";
 
 async function expectResponseStatus(response: Response, expected: number) {
   const actual = response.status();
@@ -27,7 +28,7 @@ test("P1/P2 多会话导出、搜索和证据验证生成全链路，窄屏无�
   } });
   expect([200, 201]).toContain(configured.status());
 
-  await page.goto("/");
+  await page.goto("/e2e/component-harness.html");
   await page.getByRole("combobox", { name: "数据源" }).selectOption("qq");
   await page.getByRole("combobox", { name: "来源账号" }).selectOption("synthetic-account");
   await page.getByRole("button", { name: "读取本机会话列表" }).click();
@@ -63,12 +64,12 @@ test("P1/P2 多会话导出、搜索和证据验证生成全链路，窄屏无�
   expect(new Set(exclusionNames).size).toBe(4);
   await exclusions.first().check();
 
-  const generation = workspace.getByRole("region", { name: "AI 操作指南生成" });
+  const generation = workspace.getByRole("region", { name: "AI 主题整理" });
   await expect(generation).toContainText("排除：1 条消息");
   await generation.getByLabel("操作主题").fill("合成记录");
   await generation.getByRole("button", { name: "预览 AI 外发" }).click();
   const outbound = generation.getByRole("region", { name: "AI 外发预览" });
-  await expect(outbound).toContainText("fake（deterministic）");
+  await expect(outbound).toContainText("fake（deterministic");
   await expect(outbound).toContainText("发送 3 条纯文本");
   await outbound.getByText(/查看将要外发的完整脱敏文本/).click();
   await expect(outbound.getByRole("region", { name: "外发分块 1" })).toBeVisible();
@@ -78,13 +79,13 @@ test("P1/P2 多会话导出、搜索和证据验证生成全链路，窄屏无�
   await expect(generation.getByRole("status")).toContainText("已完成");
   const generated = generation.getByRole("region", { name: "AI 生成结果" });
   await expect(generated).toContainText("AI 生成 · 本地证据已验证");
-  await expect(generated.getByRole("heading", { name: "确定性测试操作指南" })).toBeVisible();
-  await generated.getByText("查看已验证证据（1 条）").click();
+  await expect(generated.getByRole("heading", { name: "确定性测试：合成记录" })).toBeVisible();
+  await generated.getByText("查看原始依据（3 条）", { exact: true }).last().click();
   await expect(generated.getByRole("region", { name: "已验证证据" })).toContainText("合成记录，仅用于本地测试");
 
   const editor = generation.getByRole("region", { name: "文档编辑与历史" });
   await editor.getByRole("button", { name: "创建可编辑文档" }).click();
-  await expect(editor.getByLabel("文档标题")).toHaveValue("确定性测试操作指南");
+  await expect(editor.getByLabel("文档标题")).toHaveValue("确定性测试：合成记录");
   await editor.getByLabel("文档标题").fill("用户编辑的合成指南");
   await editor.getByLabel("步骤 1").fill("用户确认后的合成步骤");
   await editor.getByLabel("修改说明").fill("浏览器端到端编辑");
@@ -101,7 +102,7 @@ test("P1/P2 多会话导出、搜索和证据验证生成全链路，窄屏无�
   await expect(deletion.getByLabel("删除影响清单")).toContainText("文档导出记录：1");
   await deletion.getByRole("checkbox", { name: /我已核对上述影响/ }).check();
   await deletion.getByRole("button", { name: "确认删除" }).click();
-  await expect(editor.getByRole("button", { name: "创建可编辑文档" })).toBeVisible();
+  await expect(editor).toHaveCount(0);
 
   expect(externalRequests).toHaveLength(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -118,7 +119,7 @@ test("P1 运行中导出可从 UI 取消且不变为可搜索", async ({ page, r
     source_id: "qq", account_id: "synthetic-account", base_url: "http://127.0.0.1:40653",
     client_version: "fixture-client-1", tool_version: "fixture-tool-1", account_version: "fixture-account-1",
   } });
-  await page.goto("/");
+  await page.goto("/e2e/component-harness.html");
   await page.getByRole("combobox", { name: "数据源" }).selectOption("qq");
   await page.getByRole("combobox", { name: "来源账号" }).selectOption("synthetic-account");
   await page.getByRole("button", { name: "读取本机会话列表" }).click();

@@ -1,9 +1,11 @@
+import { useRawEvidenceGuard, withoutRawEvidence } from "../data/useRawEvidenceGuard";
 import { useEffect, useState } from "react";
 import type { LocalApiClient } from "../../api/client";
 import type { HowToDocument } from "../../types";
 import { DocumentEditor } from "./DocumentEditor";
 
 export function DocumentLibrary({ api, outputRootId, onOpen }: { api: LocalApiClient; outputRootId: string; onOpen?: (document: HowToDocument) => void }) {
+  const guardRawEvidence = useRawEvidenceGuard();
   const [documents, setDocuments] = useState<HowToDocument[]>([]);
   const [opened, setOpened] = useState<HowToDocument | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -16,7 +18,7 @@ export function DocumentLibrary({ api, outputRootId, onOpen }: { api: LocalApiCl
     if (typeof api.recoverDocuments !== "function" || busy) return;
     setBusy(true); setError("");
     try {
-      const page = await api.recoverDocuments(cursor);
+      const page = await guardRawEvidence(api.recoverDocuments(cursor), value => ({ ...value, documents: value.documents.map(withoutRawEvidence) }));
       setDocuments(existing => cursor === null ? page.documents : [
         ...existing,
         ...page.documents.filter(item => !existing.some(found => found.document_id === item.document_id)),
@@ -28,12 +30,20 @@ export function DocumentLibrary({ api, outputRootId, onOpen }: { api: LocalApiCl
   }
 
   useEffect(() => { void load(null); }, [api]);
+  useEffect(() => {
+    const clear = () => {
+      setDocuments(values => values.map(value => ({ ...value, source_evidence: [] })));
+      setOpened(value => value ? { ...value, source_evidence: [] } : value);
+    };
+    window.addEventListener("minutes-raw-cleared", clear);
+    return () => window.removeEventListener("minutes-raw-cleared", clear);
+  }, []);
 
   async function openLatest(documentId: string) {
     if (busy) return;
     setBusy(true); setError("");
     try {
-      const latest = await api.document(documentId);
+      const latest = await guardRawEvidence(api.document(documentId), withoutRawEvidence);
       setDocuments(items => items.map(item => item.document_id === documentId ? latest : item));
       if (onOpen) onOpen(latest); else setOpened(latest);
     } catch { setError("无法打开最新版本，请重试；当前文档未被更改。"); }

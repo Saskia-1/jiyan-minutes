@@ -186,7 +186,7 @@ def render_markdown(version: DocumentVersion, evidence: tuple[ValidatedEvidence,
         for item in content.professional_extensions:
             lines += [f"### {_md(item.heading)}", "", _md(item.text), ""]
     if source_mode == "with_sources":
-        lines += ["## 来源证据", ""]
+        lines += ["本文件包含原始对话摘录；删除原文不会删除本文件中的摘录。", "", "## 来源证据", ""]
         for index, item in enumerate(_used_evidence(version, evidence), 1):
             sender = item.sender_name or item.sender_id or "未知发送者"
             lines += [f"### 证据 {index}", "", f"- 发送者：{_md(sender)}",
@@ -258,6 +258,7 @@ def render_docx(version: DocumentVersion, evidence: tuple[ValidatedEvidence, ...
             document.add_heading(item.heading, level=2)
             document.add_paragraph(item.text)
     if source_mode == "with_sources":
+        document.add_paragraph("本文件包含原始对话摘录；删除原文不会删除本文件中的摘录。")
         document.add_heading("来源证据", level=1)
         for index, item in enumerate(_used_evidence(version, evidence), 1):
             document.add_heading(f"证据 {index}", level=2)

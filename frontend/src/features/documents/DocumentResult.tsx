@@ -1,3 +1,4 @@
+import { useRawEvidenceGuard, withoutRawEvidence } from "../data/useRawEvidenceGuard";
 import { useEffect, useRef, useState } from "react";
 import type { LocalApiClient } from "../../api/client";
 import type { HowToDocument } from "../../types";
@@ -12,6 +13,7 @@ const TITLE_MARKER_ERROR = "请保留文档标题标记；你的未保存内容�
 export function DocumentResult({ api, generationJobId, initialDocument = null }: {
   api: LocalApiClient; generationJobId?: string; initialDocument?: HowToDocument | null;
 }) {
+  const guardRawEvidence = useRawEvidenceGuard();
   const [doc, setDoc] = useState(initialDocument);
   const [editing, setEditing] = useState(false);
   const [previewing, setPreviewing] = useState(true);
@@ -23,11 +25,16 @@ export function DocumentResult({ api, generationJobId, initialDocument = null }:
   const [notice, setNotice] = useState("");
   const creation = useRef<Promise<HowToDocument> | null>(null);
   useEffect(() => {
+    const clear = () => setDoc(value => value ? { ...value, source_deleted: true, source_evidence: [] } : value);
+    window.addEventListener("minutes-raw-cleared", clear);
+    return () => window.removeEventListener("minutes-raw-cleared", clear);
+  }, []);
+  useEffect(() => {
     let active = true;
     if (!initialDocument && generationJobId) {
       setBusy(true);
       // Preserve one creation request across StrictMode effect replay.
-      creation.current ||= api.createDocument(generationJobId);
+      creation.current ||= guardRawEvidence(api.createDocument(generationJobId), withoutRawEvidence);
       creation.current.then(value => { if (active) setDoc(value); })
         .catch(() => { if (active) setError("文档保存失败，请重试保存；生成结果仍在本地保留。"); })
         .finally(() => { if (active) setBusy(false); });
@@ -43,7 +50,7 @@ export function DocumentResult({ api, generationJobId, initialDocument = null }:
     setBusy(true); setError(""); setNotice("");
     try {
       const content = { ...doc.current_version.content, user_text: draft, title: title.slice(0, 500) };
-      setDoc(await api.createDocumentVersion(doc.document_id, doc.current_version.version_id, content, "用户确认完整文本"));
+      setDoc(await guardRawEvidence(api.createDocumentVersion(doc.document_id, doc.current_version.version_id, content, "用户确认完整文本"), withoutRawEvidence));
       setEditing(false); setPreviewing(true); setNotice("已确认修改，预览和下载使用新版本。AI 原始版本仍保留。");
     } catch { setError("修改未保存，请保留文本后重试。原版本未被覆盖。"); }
     finally { setBusy(false); }
@@ -84,6 +91,7 @@ export function DocumentResult({ api, generationJobId, initialDocument = null }:
     </section>
     <section className="panel" aria-label="预览与下载"><h2>4. 预览与下载</h2>
       {!doc ? <p role="status">{busy ? "正在保存生成结果…" : "整理完成后，文档会出现在这里。"}</p> : <>
+        {doc.source_deleted && <p className="muted">原文已删除或到期，原始依据不可再查看；文档与版本仍可编辑和下载。</p>}
         <p className="muted">{doc.current_version.origin === "ai_generated" ? "AI 原始版本" : "用户版本 · 原始依据仅供对照，不代表已核验编辑内容"} · 版本 {doc.current_version.ordinal}</p>
         <button type="button" aria-expanded={previewing} onClick={() => setPreviewing(value => !value)}>预览结果</button>
         {previewing && <ResultView verified={doc.current_version.origin === "ai_generated"} value={{ result: doc.current_version.content, evidence: doc.source_evidence }} />}
@@ -93,10 +101,10 @@ export function DocumentResult({ api, generationJobId, initialDocument = null }:
           <button type="button" disabled={busy} onClick={() => void download()}>下载文档</button></div>
         {editing && <p className="muted">未确认的修改不影响当前预览和下载。</p>}
         <details><summary>历史版本</summary><VersionHistory versions={doc.versions} currentVersionId={doc.current_version.version_id} disabled={busy}
-          onRestore={id => { setBusy(true); setError(""); void api.restoreDocumentVersion(doc.document_id, id).then(setDoc)
+          onRestore={id => { setBusy(true); setError(""); void guardRawEvidence(api.restoreDocumentVersion(doc.document_id, id), withoutRawEvidence).then(setDoc)
             .catch(() => setError("恢复失败，原版本仍保留。")).finally(() => setBusy(false)); }} /></details>
       </>}
-      {!doc && error && generationJobId && <button disabled={busy} onClick={() => { setBusy(true); setError(""); void api.createDocument(generationJobId).then(setDoc).catch(() => setError("文档保存失败，请重试。")).finally(() => setBusy(false)); }}>重试保存</button>}
+      {!doc && error && generationJobId && <button disabled={busy} onClick={() => { setBusy(true); setError(""); void guardRawEvidence(api.createDocument(generationJobId), withoutRawEvidence).then(setDoc).catch(() => setError("文档保存失败，请重试。")).finally(() => setBusy(false)); }}>重试保存</button>}
       {error && <p role="alert">{error}</p>}{notice && <p role="status">{notice}</p>}
     </section>
   </>;

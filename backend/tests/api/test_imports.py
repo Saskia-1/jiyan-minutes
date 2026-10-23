@@ -291,3 +291,25 @@ def test_expired_absolute_recovery_window_cannot_revive_old_import_authority(p0)
     )
     assert recovered.status_code == 200, recovered.json()
     assert recovered.json() == {"imports": [], "next_cursor": None}
+
+
+def test_partial_commit_requires_skip_confirmation_and_reports_actual_counts(p0):
+    p0.start(); p0.bootstrap()
+    body = _request_body()
+    body["payload_base64"] = b64encode((
+        "conversation,time,sender,text,id\n"
+        "project,2026-09-13 10:20,A,synthetic imported,m1\n"
+        "project,invalid,A,synthetic skipped,m2\n"
+    ).encode()).decode()
+    preview = p0.request("POST", "/api/imports/previews", json=body).json()
+    assert preview["ready_to_commit"] and preview["analysis"]["unresolved_count"] == 1
+    url = f"/api/imports/previews/{preview['preview_id']}/commit"
+    commit = {"preview_fingerprint": preview["preview_fingerprint"], "confirmed": True}
+    assert p0.request("POST", url, json=commit).status_code == 409
+    commit["accept_skipped"] = True
+    result = p0.request("POST", url, json=commit)
+    assert result.status_code == 201
+    assert (result.json()["imported_count"], result.json()["skipped_count"]) == (1, 1)
+    recovered = p0.request("POST", "/api/imports/recovery", json={}).json()["imports"][0]
+    assert (recovered["imported_count"], recovered["skipped_count"]) == (1, 1)
+    assert recovered["raw_expires_at_utc"] == result.json()["raw_expires_at_utc"]
