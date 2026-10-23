@@ -1402,6 +1402,24 @@ _MIGRATION_17 = (
 )
 
 
+_MIGRATION_18 = (
+    """CREATE TABLE chat_agent_conversations (
+        conversation_id TEXT PRIMARY KEY,
+        session_digest TEXT NOT NULL CHECK (
+            length(session_digest) = 64 AND session_digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        revision INTEGER NOT NULL CHECK (revision >= 1),
+        created_at_utc TEXT NOT NULL,
+        updated_at_utc TEXT NOT NULL,
+        state_json TEXT NOT NULL CHECK (
+            json_valid(state_json) AND json_type(state_json) = 'object'
+            AND length(CAST(state_json AS BLOB)) <= 1048576
+        )
+    )""",
+    "CREATE INDEX idx_chat_agent_conversations_session ON chat_agent_conversations(session_digest, updated_at_utc)",
+)
+
+
 MigrationAction = tuple[str, ...] | Callable[[sqlite3.Connection], None]
 MIGRATIONS: tuple[tuple[int, MigrationAction], ...] = (
     (1, _MIGRATION_1),
@@ -1421,6 +1439,7 @@ MIGRATIONS: tuple[tuple[int, MigrationAction], ...] = (
     (15, _MIGRATION_15),
     (16, _complete_retention_structures),
     (17, _MIGRATION_17),
+    (18, _MIGRATION_18),
 )
 
 

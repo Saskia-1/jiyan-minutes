@@ -98,6 +98,20 @@ def test_fake_provider_ai_plan_is_a_contract_fixture_without_source_content() ->
     assert set(result) == {"goal", "keywords", "summary_type", "all_content", "needs_clarification", "notices"}
 
 
+def test_fake_agent_chooses_tool_using_search_feedback_and_latest_request() -> None:
+    def choose(results, requests):
+        payload = {"operation": "agent_tool", "instruction": "创业整理", "requests": requests,
+                   "sources": [], "tool_results": results}
+        response = _run(FakeProvider().generate(_request(payload=json.dumps(payload).encode()), CancellationToken()))
+        return json.loads(response.content)
+    first = choose([], ["整理创业的想法"])
+    assert first == {"tool": "search_sources", "arguments": {"terms": ["创业"], "summary_type": "ideas", "goal": "整理所选资料"}}
+    assert choose([{"tool": "search_sources", "terms": ["创业"], "hit_count": 2}], ["整理创业的想法"]) == {
+        "tool": "generate_document", "arguments": {}}
+    assert choose([], ["整理创业的想法", "只保留商业模式方面的观点"])["arguments"]["terms"] == ["商业模式"]
+    assert choose([{"tool": "search_sources", "terms": ["创业"], "hit_count": 0}], ["整理创业的想法"])["tool"] == "ask_user"
+
+
 def test_fake_provider_summary_is_stable_and_cites_the_supplied_message() -> None:
     request = _request(payload=json.dumps({
         "generation_kind": "summary", "topic": "就业",

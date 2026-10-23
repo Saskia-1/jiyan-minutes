@@ -1,13 +1,13 @@
 import { test, expect } from "./acknowledged-test";
 import { readFile } from "node:fs/promises";
 
-test("正式 Agent 首页自然要求、修改撤销、取消零外发与同版本双 TXT", async ({ page }) => {
+test("保留工作台自然要求、修改撤销、取消零外发与同版本双 TXT", async ({ page }) => {
   test.setTimeout(90_000);
   let starts = 0, expansions = 0, plans = 0;
   page.on("request", request => { if (request.method() === "POST" && new URL(request.url()).pathname === "/api/generation/jobs") starts++;
     if (new URL(request.url()).pathname === "/api/agent/plans/execute") plans++;
     if (new URL(request.url()).pathname.startsWith("/api/generation/topic-expansion")) expansions++; });
-  await page.goto("/"); await expect(page.getByRole("heading", { name: "记言 · Minutes", exact: true })).toBeVisible();
+  await page.goto("/e2e/legacy-workspace.html"); await expect(page.getByRole("heading", { name: "记言 · Minutes", exact: true })).toBeVisible();
   const chat = page.getByRole("region", { name: "聊天内容" });
   await chat.getByRole("radio", { name: "粘贴文本" }).check();
   await chat.getByRole("textbox", { name: "聊天文本" }).fill("甲：\n创业可以先记录用户需要，再尝试验证小规模的想法。\n\n乙：\n创业时也要记录不同观点和每次验证的反馈。");
@@ -62,8 +62,8 @@ test("正式 Agent 首页自然要求、修改撤销、取消零外发与同版�
   expect(starts).toBe(1); expect(expansions).toBe(0); expect(plans).toBe(1);
 });
 
-test("新导入笔记在 Agent 主流程直接整理，刷新不自动纳入历史聊天", async ({ page }) => {
-  await page.goto("/"); const chat = page.getByRole("region", { name: "聊天内容" });
+test("保留工作台新导入笔记直接整理，刷新不自动纳入历史聊天", async ({ page }) => {
+  await page.goto("/e2e/legacy-workspace.html"); const chat = page.getByRole("region", { name: "聊天内容" });
   await chat.getByText("截图 OCR / 笔记文字导入").click();
   const importer = chat.getByRole("region", { name: "截图或笔记正文导入" });
   await importer.getByRole("radio", { name: "粘贴笔记文字" }).check();

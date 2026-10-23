@@ -1,3 +1,4 @@
+import { createConversationClient } from "./conversations";
 import {
   completenessStates, conversationTypes, evidenceClasses, secretOperations, secretSectionLabels, sourceBaseUrls, sourceIds, sourceTools, statusLabels, validTimezone, verificationStates,
   type Conversation, type Disclosure, type EnvironmentReport, type Report, type SecretDisclosure, type Selection, type SetupOptions,
@@ -752,7 +753,7 @@ export function createClient() {
         credentials: "same-origin", cache: "no-store", redirect: "error", ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
       if (response.status === 401) {
         if (lease.generation === latestGeneration) session = undefined;
-        if (body === undefined && retryGet) return request(path, parser, undefined, false);
+        if (body === undefined && retryGet) return request(path, parser, undefined, false, csrfForGet, mutationMethod);
       }
       if (!response.ok) {
         let code: string | null = null;
@@ -782,6 +783,7 @@ export function createClient() {
     });
   }
   return {
+    ...createConversationClient(request),
     setupOptions: () => request("/api/setup-options", parseSetupOptions),
     environment: () => request("/api/environment", parseEnvironment),
     sources: () => request("/api/sources", parseSources),

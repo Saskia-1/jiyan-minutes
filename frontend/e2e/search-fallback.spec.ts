@@ -5,7 +5,7 @@ test("主题扩展失败时多个关键词仍召回无时间聊天，保留上�
     status: 200, contentType: "application/json",
     body: JSON.stringify({ topic: "创业、就业", terms: ["创业、就业"], degraded: true }),
   }));
-  await page.goto("/");
+  await page.goto("/e2e/legacy-workspace.html");
   const compliance = page.getByRole("dialog", { name: "使用与合规提示" });
   await expect(compliance).toBeVisible();
   await compliance.getByRole("checkbox", { name: "我已知悉" }).check();

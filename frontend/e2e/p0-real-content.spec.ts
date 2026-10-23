@@ -23,7 +23,7 @@ test("P0 原始 TXT 直接导入、生成与刷新恢复", async ({ page }) => {
   const before = createHash("sha256").update(await readFile(sourcePath!)).digest("hex");
   expect(before).toBe(expectedSha);
 
-  await page.goto("/");
+  await page.goto("/e2e/legacy-workspace.html");
   await page.getByLabel("保存位置").selectOption("fixture-root");
   const importer = page.getByRole("region", { name: "导入聊天记录" });
   await importer.getByLabel("聊天记录文件").setInputFiles(sourcePath!);

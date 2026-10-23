@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from chat_to_howto.api.agent import create_agent_router
+from chat_to_howto.api.agent_conversations import create_agent_conversations_router
 from chat_to_howto.api.documents import create_documents_router
 from chat_to_howto.api.document_exports import create_document_exports_router
 from chat_to_howto.api.deletion import create_deletion_router
@@ -41,6 +42,7 @@ from chat_to_howto.domain.generation import GenerationBudget
 from chat_to_howto.domain.search import SearchRequest
 from chat_to_howto.environment import KNOWN_APPLICATION_PATHS, collect_environment
 from chat_to_howto.repositories.chat import ChatRepository, SnapshotRef
+from chat_to_howto.repositories.agent_conversations import AgentConversationRepository
 from chat_to_howto.repositories.content import ContentRepository
 from chat_to_howto.services.artifacts import ApprovedOutputRoot, ArtifactWriter
 from chat_to_howto.services.documents import DocumentService
@@ -71,6 +73,7 @@ from chat_to_howto.services.p0_verifier import P0Verifier
 from chat_to_howto.services.search import ChatSearchService
 from chat_to_howto.services.topic_expansion import TopicExpansionService
 from chat_to_howto.services.ai_agent_planning import AIAgentPlanningService
+from chat_to_howto.services.conversation_agent import ConversationAgentService
 
 
 _DISCLOSURE_SECTIONS = (
@@ -297,6 +300,17 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
     )
     generation_orchestrator.reconcile_interrupted()
     document_service = DocumentService(repository=chat_repository, clock=clock)
+    conversation_store = AgentConversationRepository(chat_repository)
+    conversation_store.sweep(now_utc=clock().astimezone(timezone.utc))
+    conversation_agent = ConversationAgentService(
+        repository=chat_repository, mixed_search=mixed_search,
+        generation=generation_orchestrator, documents=document_service,
+        provider_factory=selected_generation_provider_factory,
+        provider=settings.llm_provider, model=settings.llm_model, clock=clock,
+        max_daily_provider_requests=settings.llm_daily_request_limit,
+        thinking=settings.llm_thinking, reasoning_effort=settings.llm_reasoning_effort,
+        max_output_tokens=settings.llm_max_output_tokens,
+    )
     document_export_service = DocumentExportService(
         document_service=document_service,
         repository=chat_repository,
@@ -320,6 +334,7 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
     app.state.mixed_search = mixed_search
     app.state.generation_orchestrator = generation_orchestrator
     app.state.ai_agent_planning_service = ai_agent_planning_service
+    app.state.conversation_agent = conversation_agent
     app.state.document_service = document_service
     app.state.document_export_service = document_export_service
     app.state.deletion_service = deletion_service
@@ -382,8 +397,9 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
                 body.extend(chunk)
             request._body = bytes(body)
         retention_service.sweep()
+        conversation_agent.sweep()
         if retention_service.pending_count and request.url.path.startswith((
-            "/api/search", "/api/mixed-search", "/api/generation", "/api/imports", "/api/content-imports", "/api/export"
+            "/api/search", "/api/mixed-search", "/api/generation", "/api/imports", "/api/content-imports", "/api/export", "/api/agent/conversations"
         )):
             return error(503)
         response = await call_next(request)
@@ -913,6 +929,13 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
             ),
         )
 
+    app.include_router(
+        create_agent_conversations_router(
+            get_service=lambda: app.state.conversation_agent,
+            require_session=require_p1_session,
+            require_csrf=require_p1_csrf,
+        )
+    )
     app.include_router(
         create_agent_router(
             require_session=require_p1_session,

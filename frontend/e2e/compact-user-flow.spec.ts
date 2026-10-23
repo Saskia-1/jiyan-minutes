@@ -7,7 +7,7 @@ const sample = fileURLToPath(new URL("./fixtures/undated-browser-sample.txt", im
 test("简洁网页从文件上传到隔离 AI 生成、编辑、下载和刷新恢复", async ({ page }) => {
   test.setTimeout(90_000);
   await page.addInitScript(() => { Object.defineProperty(window, "showSaveFilePicker", { value: undefined }); });
-  await page.goto("/");
+  await page.goto("/e2e/legacy-workspace.html");
 
   const chat = page.getByRole("region", { name: "聊天内容" });
   await chat.getByLabel("聊天记录文件").setInputFiles(sample);

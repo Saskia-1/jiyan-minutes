@@ -52,6 +52,7 @@ export function installApi() {
       tools: { python3: { version: "3.13-fixture", architecture: "arm64", installed: true } }, issues: [] as Array<{ code: string; message: string }>,
     },
     sessionCount: 0, jobStatus: 202, secretStatus: 204, report: { ...report } as Record<string, any>, challenge: "opaque-consent-1",
+    agentConversations: [] as Array<Record<string, any>>,
     jobReads: 0, reportQueue: [] as Array<Record<string, any>>, delayJob: null as Promise<Response> | null,
     delaySources: null as Promise<Response> | null,
     delayEnvironment: null as Promise<Response> | null,
@@ -70,6 +71,13 @@ export function installApi() {
       return json({ csrf_token: `synthetic-csrf-${state.sessionCount}`, expires_at: "2099-01-01T00:00:00Z" });
     }
     if (!state.sessionCount) return json({ code: "request_rejected" }, 401);
+    if (path === "/api/agent/conversations") {
+      if (request.method === "GET") return json({ conversations: state.agentConversations.map(({ conversation_id, title, revision, created_at, updated_at }) => ({ conversation_id, title, revision, created_at, updated_at })) });
+      const value = { conversation_id: "conversation:fixture", title: "新会话", revision: 1,
+        created_at: "2026-10-23T00:00:00Z", updated_at: "2026-10-23T00:00:00Z", sources: [], messages: [], active_run: null };
+      state.agentConversations.push(value); return json(value);
+    }
+    if (path.startsWith("/api/agent/conversations/") && request.method === "GET") return json(state.agentConversations[0]);
     if (path === "/api/setup-options") return json(state.setupOptions);
     if (path === "/api/environment") {
       if (state.delayEnvironment) { const pending = state.delayEnvironment; state.delayEnvironment = null; return await pending; }

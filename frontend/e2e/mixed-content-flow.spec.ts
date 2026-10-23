@@ -4,7 +4,7 @@ import { readFile, stat } from "node:fs/promises";
 test("笔记从正式网页导入、逐条选择、隔离生成、证据、下载及刷新恢复", async ({ page }) => {
   test.setTimeout(90_000);
   await page.addInitScript(() => { Object.defineProperty(window, "showSaveFilePicker", { value: undefined }); });
-  await page.goto("/");
+  await page.goto("/e2e/legacy-workspace.html");
   const chat = page.getByRole("region", { name: "聊天内容" });
   await chat.getByText("截图 OCR / 笔记文字导入").click();
   const importPanel = chat.getByRole("region", { name: "截图或笔记正文导入" });
@@ -56,7 +56,7 @@ test("笔记从正式网页导入、逐条选择、隔离生成、证据、下�
 });
 
 test("截图通过网页上传后由本机 OCR 提取正文候选并等待人工确认", async ({ page }) => {
-  await page.goto("/");
+  await page.goto("/e2e/legacy-workspace.html");
   const encoded = await page.evaluate(() => {
     const canvas = document.createElement("canvas");
     canvas.width = 900; canvas.height = 1200;

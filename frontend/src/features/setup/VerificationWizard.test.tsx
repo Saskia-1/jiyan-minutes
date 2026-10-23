@@ -167,15 +167,16 @@ it("安全检测较晚返回时只填空白版本，不覆盖用户已输入的�
   await waitFor(() => expect(screen.getByLabelText("本地工具版本")).toHaveValue("0.4.2"));
 });
 
-it("简洁首页共享一个 session，默认不连接 QQ/微信来源", async () => {
+it("对话首页共享一个 session，默认不连接 QQ/微信来源", async () => {
   const { default: App } = await loadSubject("App");
   const api = installApi(); vi.stubGlobal("fetch", api.fetch);
   render(<App />);
   const acknowledgment = userEvent.setup();
   await acknowledgment.click(screen.getByRole("checkbox", { name: "我已知悉" }));
   await acknowledgment.click(screen.getByRole("button", { name: "继续使用" }));
-  await screen.findByRole("region", { name: "聊天内容" });
-  await waitFor(() => expect(api.requests.filter(item => item.path === "/api/imports/recovery")).toHaveLength(1));
+  await screen.findByRole("textbox", { name: "发送消息" });
+  await waitFor(() => expect(api.requests.filter(item => item.path === "/api/agent/conversations" && item.method === "GET")).toHaveLength(1));
+  expect(api.requests.filter(item => item.path === "/api/imports/recovery")).toHaveLength(0);
   expect(api.requests.filter(item => item.path === "/api/sources")).toHaveLength(0);
   expect(api.requests.filter(item => item.path === "/api/session")).toHaveLength(1);
 });
@@ -618,22 +619,20 @@ it("秘密写入成功但非秘密状态刷新失败时保留成功事实且不�
   expect(api.requests.filter(item => item.path.endsWith("/secret-operations"))).toHaveLength(1);
 });
 
-it("App 保留同源配置，首页四区且文件导入只通过系统选择器", async () => {
+it("App 保留同源配置，首页为对话且文件导入只通过系统选择器", async () => {
   const { default: App } = await loadSubject("App");
   const api = installApi(); vi.stubGlobal("fetch", api.fetch);
   render(<App />);
   const acknowledgment = userEvent.setup();
   await acknowledgment.click(screen.getByRole("checkbox", { name: "我已知悉" }));
   await acknowledgment.click(screen.getByRole("button", { name: "继续使用" }));
-  await screen.findByRole("region", { name: "聊天内容" });
+  await screen.findByRole("textbox", { name: "发送消息" });
   expect(api.requests.some(item => item.path === "/api/setup-options")).toBe(true);
-  expect(screen.getAllByRole("heading", { level: 2 }).map(item => item.textContent)).toEqual([
-    "1. 添加资料", "2. 交给记言整理", "3. 是否自行修改和补充？", "4. 预览与下载",
-  ]);
-  expect(screen.getByRole("radio", { name: "授权导入（即将支持）" })).toBeDisabled();
+  expect(screen.queryByRole("heading", { name: /1\. 添加资料|2\. 交给记言整理/ })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "新建对话" })).toBeVisible();
   expect(screen.queryByRole("combobox", { name: "保存位置" })).not.toBeInTheDocument();
   const fileInput = document.querySelector('input[type="file"]');
-  expect(fileInput).toHaveAttribute("accept", ".txt,.json,.jsonl,.csv,.xlsx,.zip");
+  expect(fileInput).toHaveAttribute("accept", ".txt,.csv,.json,.jsonl,.xlsx,.zip,.png,.jpg,.jpeg");
   expect(document.querySelector('input[placeholder*="/"]')).toBeNull();
 });
 
@@ -645,8 +644,8 @@ it("浏览器下载无需批准输出目录，首页不擅自替换服务端根�
   const acknowledgment = userEvent.setup();
   await acknowledgment.click(screen.getByRole("checkbox", { name: "我已知悉" }));
   await acknowledgment.click(screen.getByRole("button", { name: "继续使用" }));
-  expect(await screen.findByRole("region", { name: "聊天内容" })).toBeVisible();
-  expect(screen.getByRole("button", { name: "理解并整理" })).toBeDisabled();
+  expect(await screen.findByRole("textbox", { name: "发送消息" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
   expect(api.requests.some(item => item.path.endsWith("/verification-jobs"))).toBe(false);
   expect(api.requests.some(item => item.path.endsWith("/exports"))).toBe(false);
 });

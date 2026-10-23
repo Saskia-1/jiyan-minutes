@@ -81,6 +81,20 @@ class FakeProvider:
     def _deterministic_result(request: ProviderRequest) -> str:
         try:
             payload = json.loads(request.payload)
+            if isinstance(payload, dict) and payload.get("operation") == "agent_tool":
+                # Test contract only: the next action depends on actual tool metadata.
+                results = payload.get("tool_results", [])
+                if results:
+                    action = ({"tool": "generate_document", "arguments": {}}
+                        if results[-1].get("hit_count", 0) > 0 else
+                        {"tool": "ask_user", "arguments": {"question": "没有找到相关资料，请调整要求或添加资料。"}})
+                else:
+                    requests = payload.get("requests", [])
+                    instruction = str(requests[-1] if requests else payload.get("instruction", ""))
+                    term = next((word for word in ("商业模式", "创业", "阅读", "歌单") if word in instruction), "synthetic")
+                    action = {"tool": "search_sources", "arguments": {
+                        "terms": [term], "summary_type": "viewpoints" if "观点" in instruction else "ideas", "goal": "整理所选资料"}}
+                return json.dumps(action, ensure_ascii=False, sort_keys=True)
             if isinstance(payload, dict) and payload.get("operation") == "plan_agent":
                 # Synthetic contract fixtures, never a semantic-quality evaluation.
                 instruction = str(payload.get("instruction", ""))
