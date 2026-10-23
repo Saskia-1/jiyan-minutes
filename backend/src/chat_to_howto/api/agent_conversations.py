@@ -29,6 +29,7 @@ class ConversationSources(_Strict):
 
 
 class ConversationMessage(_Strict):
+    automatic: bool = False
     text: str = Field(min_length=1, max_length=512, repr=False)
     client_message_id: str = Field(min_length=1, max_length=128)
 
@@ -104,9 +105,15 @@ def create_agent_conversations_router(*, get_service: Callable[[], ConversationA
 
     @router.post('/{conversation_id}/messages')
     def send_message(conversation_id: str, request: ConversationMessage,
+            background_tasks: BackgroundTasks,
             service=Depends(get_service), session_id=Depends(require_session)):
-        return call(service.send_message, conversation_id, text=request.text,
-            client_message_id=request.client_message_id, session_id=session_id)
+        result = call(service.send_message, conversation_id, text=request.text,
+            client_message_id=request.client_message_id, session_id=session_id, automatic=request.automatic)
+        run = result.get('active_run')
+        if request.automatic and run and run['state'] == 'running':
+            background_tasks.add_task(service.run_automatic, conversation_id, run['run_id'],
+                session_id=session_id)
+        return result
 
     @router.post('/{conversation_id}/runs/{run_id}/approve')
     def approve(conversation_id: str, run_id: str, request: ConversationApproval,

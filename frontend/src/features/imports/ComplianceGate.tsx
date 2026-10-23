@@ -34,9 +34,9 @@ export function ComplianceGate({ children }: { children: ReactNode }) {
     {open && <dialog ref={dialog} aria-labelledby="compliance-title" onCancel={event => event.preventDefault()}>
       <h2 id="compliance-title">使用与合规提示</h2>
       <p>请确认你有权整理该对话，内容可能含他人个人信息。</p>
-      <p>生成时，主题相关内容会在本机脱敏后发送给外部 AI 模型；每次发送前需要单独授权。脱敏不保证覆盖全部个人信息。</p>
+      <p>主对话中，上传或粘贴即同意本机导入，发送整理要求即同意本轮使用所选相关资料调用外部 AI。可随时停止；脱敏不保证覆盖全部个人信息。高级手动工具仍逐次授权。</p>
       <p>平台不识别保密等级，请勿导入涉密、受公司保密或合规限制、或无权外发的材料。</p>
-      <p>文档与依据附录会长期保存在本机。原文自确认导入起保留 7 天，你可提前删除；到期停用并触发清理。文档内已有的摘录会保留。</p>
+      <p>文档与独立核查参考会长期保存在本机。原文自成功导入起保留 7 天，你可提前删除；到期停用并触发清理。文档内已有的摘录会保留。</p>
       <label className="check"><input type="checkbox" checked={checked} onChange={event => setChecked(event.target.checked)} />我已知悉</label>
       <button type="button" disabled={!checked} onClick={accept}>继续使用</button>
     </dialog>}

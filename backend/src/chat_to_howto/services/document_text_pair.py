@@ -43,7 +43,7 @@ def render_document_text_pair(document: HowToDocument, *, version_id: str) -> Do
         warning = (f"结构化参考对应 AI 原始版本 {original.version_id}；"
                    "未自动核验用户新增或改写的文字。")
 
-    # One deterministic map is shared by both outputs, including missing records.
+    # Keep evidence numbering in the separate reference file, including missing records.
     numbers = {identifier: index for index, identifier in
                enumerate(_referenced_message_ids(cited_version.content), 1)}
     title = version.content.title
@@ -54,15 +54,11 @@ def render_document_text_pair(document: HowToDocument, *, version_id: str) -> Do
         for _kind, text in blocks:
             body_content.extend((text, ""))
     else:
-        body_content = _content_lines(version.content, {} if user_content else numbers)
+        body_content = _content_lines(version.content)
     metadata = [f"版本：{version.ordinal}", f"版本标识：{version.version_id}",
                 f"来源：{_origin_label(version.origin)}"]
-    body_lines = [title, "", *metadata, ""]
-    if warning:
-        body_lines.extend((warning, ""))
+    body_lines = [title, ""]
     body_lines.extend(body_content)
-    if user_content and numbers:
-        body_lines.extend(("AI 原始版本结构化参考索引（仅供对照）：", _markers(tuple(numbers), numbers), ""))
 
     reference_lines = [f"{title} · 核查参考", "", *metadata, ""]
     if warning:
@@ -107,30 +103,23 @@ def _has_user_content(version: DocumentVersion, versions: tuple[DocumentVersion,
     return version.origin == "user_edited" or version.content.user_text is not None
 
 
-def _markers(identifiers: tuple[str, ...], numbers: dict[str, int]) -> str:
-    return "".join(f"[证据{numbers[value]}]" for value in identifiers if value in numbers)
-
-
-def _content_lines(content: GenerationResult, numbers: dict[str, int]) -> list[str]:
-    def cited(text: str, identifiers: tuple[str, ...]) -> str:
-        markers = _markers(identifiers, numbers)
-        return f"{text} {markers}" if markers else text
-
+def _content_lines(content: GenerationResult) -> list[str]:
+    """Render substantive result fields without adding verification annotations."""
     lines: list[str] = []
     if content.summary is not None:
         for label, items in summary_groups(content.summary):
             if items:
                 lines.extend((label, ""))
                 for item in items:
-                    lines.extend((cited(item.text, item.source_message_ids), ""))
+                    lines.extend((item.text, ""))
     elif content.status == "complete":
         if content.preparations:
             lines.extend(("准备", ""))
-            lines.extend(cited(item.text, item.source_message_ids) for item in content.preparations)
+            lines.extend(item.text for item in content.preparations)
             lines.append("")
         lines.extend(("步骤", ""))
         for index, step in enumerate(content.steps, 1):
-            lines.append(cited(f"{index}. {step.instruction}", step.source_message_ids))
+            lines.append(f"{index}. {step.instruction}")
             for label, values in (("位置", (step.location,) if step.location else ()),
                                   ("参数", step.parameters), ("条件", step.conditions),
                                   ("注意", step.warnings),
@@ -140,16 +129,16 @@ def _content_lines(content: GenerationResult, numbers: dict[str, int]) -> list[s
             lines.append("")
         if content.checks:
             lines.extend(("检查", ""))
-            lines.extend(cited(item.text, item.source_message_ids) for item in content.checks)
+            lines.extend(item.text for item in content.checks)
             lines.append("")
         if content.missing_information:
             lines.extend(("仍缺信息", "", *content.missing_information, ""))
         if content.conflicts:
             lines.extend(("冲突", ""))
             for item in content.conflicts:
-                lines.extend((item.description, cited(f"说法 A：{item.claim_a}", item.claim_a_source_message_ids),
-                    cited(f"说法 B：{item.claim_b}", item.claim_b_source_message_ids),
-                    cited(f"处理：{item.resolution}", item.resolution_source_message_ids)
+                lines.extend((item.description, f"说法 A：{item.claim_a}",
+                    f"说法 B：{item.claim_b}",
+                    f"处理：{item.resolution}"
                     if item.resolution else "处理：尚未解析", ""))
     if content.professional_extensions:
         lines.extend(("专业补充（AI 提供，非原聊天内容）", ""))

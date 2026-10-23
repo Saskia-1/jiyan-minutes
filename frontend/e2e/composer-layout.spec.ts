@@ -15,8 +15,8 @@ test("长聊天粘贴与窄低屏下输入区不越过已展开的高级工具",
       const data = new DataTransfer(); data.setData("text/plain", text);
       element.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
     }, chat);
-    await expect(page.getByRole("region", { name: "导入确认", exact: true })).toHaveCount(index + 1);
-    await expect(page.getByRole("checkbox", { name: "我已核对预览并确认导入", exact: true })).toHaveCount(index + 1);
+    await expect(page.getByRole("region", { name: "本会话资料", exact: true }).locator(".chat-source-chip")).toHaveCount(index + 1);
+    await expect(page.getByRole("region", { name: "导入确认", exact: true })).toHaveCount(0);
     await expect(input).toBeEnabled();
   }
   await input.fill("请整理这些合成讨论中的观点，并保留出处。");
@@ -37,31 +37,25 @@ test("长聊天粘贴与窄低屏下输入区不越过已展开的高级工具",
     expect(layout.area.bottom).toBeLessThanOrEqual(layout.advanced.top + 1);
     expect(layout.documentWidth).toBeLessThanOrEqual(layout.width);
   }
-  // Confirming the oldest card must still work after two later previews were created.
-  const cards = page.getByRole("region", { name: "导入确认", exact: true });
-  await cards.first().getByRole("checkbox", { name: "我已核对预览并确认导入", exact: true }).check();
-  await cards.first().getByRole("button", { name: "确认导入", exact: true }).click();
-  await expect(cards).toHaveCount(2);
-  await expect(page.getByRole("region", { name: "本会话资料", exact: true })).toContainText("对话框聊天记录");
+  await expect(page.getByRole("region", { name: "本会话资料", exact: true }).locator(".chat-source-chip")).toHaveCount(3);
+  await expect(page.getByRole("region", { name: "已导入资料", exact: true })).toHaveCount(0);
   await expect(page.getByRole("region", { name: "外发授权", exact: true })).toHaveCount(0);
 });
 
-test("直接粘贴聊天后确认导入，再输入整理要求只准备外发授权", async ({ page }) => {
+test("直接粘贴聊天后自动导入，再输入整理要求自动交付", async ({ page }) => {
+  test.setTimeout(60_000);
   await page.goto("/");
   const input = page.getByRole("textbox", { name: "发送消息", exact: true });
   await expect(input).toBeEnabled();
   await input.evaluate(element => {
-    const data = new DataTransfer(); data.setData("text/plain", "甲：\n合成讨论：先验证需求，再记录反馈。\n\n乙：\n合成回复：复盘时保留不同观点。");
+    const data = new DataTransfer(); data.setData("text/plain", "甲：\n合成创业讨论：先验证需求，再记录反馈。\n\n乙：\n合成回复：创业复盘时保留不同观点。");
     element.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
   });
-  const card = page.getByRole("region", { name: "导入确认", exact: true });
-  await expect(card).toHaveCount(1);
-  await card.getByRole("checkbox", { name: "我已核对预览并确认导入", exact: true }).check();
-  await card.getByRole("button", { name: "确认导入", exact: true }).click();
-  await expect(card).toHaveCount(0);
-  await input.fill("请整理合成讨论中的复盘观点。");
+  await expect(page.getByRole("region", { name: "本会话资料", exact: true })).toContainText("对话框聊天记录");
+  await expect(page.getByRole("region", { name: "导入确认", exact: true })).toHaveCount(0);
+  await input.fill("请整理合成讨论中的创业复盘观点。");
   await page.getByRole("button", { name: "发送", exact: true }).click();
-  const approval = page.getByRole("region", { name: "外发授权", exact: true });
-  await expect(approval).toBeVisible();
-  await expect(approval.getByRole("button", { name: "授权并继续", exact: true })).toBeDisabled();
+  await expect(page.getByRole("link", { name: "下载整理内容.txt", exact: true })).toHaveCount(1, { timeout: 45_000 });
+  await expect(page.locator(".chat-artifact-body")).toHaveCount(1);
+  await expect(page.getByRole("region", { name: "外发授权", exact: true })).toHaveCount(0);
 });

@@ -293,3 +293,137 @@ def test_cached_generation_approval_has_zero_outbound_calls_and_delivers_new_doc
     for artifact in [first_artifact,second_artifact]:
         doc=service._documents.get_document(artifact['document_id'],session_id='owner')
         assert doc.current_version.version_id==artifact['version_id']
+
+def automatic_fixture(tmp_path, actions, **options):
+    from chat_to_howto.providers.fake import FakeProvider
+    from chat_to_howto.services.generation_jobs import GenerationJobOrchestrator
+    from chat_to_howto.services.generation_cache import GenerationCacheSettings
+    from chat_to_howto.services.documents import DocumentService
+    service,control,repo,cid=setup(tmp_path,actions,**options)
+    generated=FakeProvider()
+    service._generation=GenerationJobOrchestrator(repository=repo,provider_factory=lambda _:generated,
+        cache_settings=GenerationCacheSettings(prompt_version='topic-editorial-v10-actor-evaluation',output_schema_version='1',chunk_strategy_version='1',max_chunk_input_tokens=4000,provider_behavior_revision='1'),mixed_search=service._search,clock=lambda:NOW)
+    service._documents=DocumentService(repository=repo,clock=lambda:NOW)
+    return service,control,generated,repo,cid
+
+
+def test_new_automatic_message_runs_search_feedback_and_verified_generation_without_manual_approval(tmp_path):
+    service,control,generated,repo,cid=automatic_fixture(tmp_path,[SEARCH,{'tool':'generate_document','arguments':{}}])
+    started=service.send_message(cid,text='整理创业想法',client_message_id='auto',session_id='owner',automatic=True)
+    assert started['active_run']['state']=='running' and started['active_run']['approval'] is None
+    assert not control.requests and generated.call_count==0
+    service.run_automatic(cid,started['active_run']['run_id'],session_id='owner')
+    completed=service.get_conversation(cid,session_id='owner')
+    assert completed['active_run']['state']=='complete',completed['active_run']
+    assert len(control.requests)==2 and generated.call_count==1
+    assert json.loads(control.requests[1].payload)['tool_results'][0]['hit_count']==1
+    artifact=completed['messages'][-1]
+    document=service._documents.get_document(artifact['document_id'],session_id='owner')
+    assert document.current_version.version_id==artifact['version_id']
+
+
+def test_automatic_authority_cannot_run_other_owner_or_old_manual_run(tmp_path):
+    service,control,generated,repo,cid=automatic_fixture(tmp_path,[SEARCH,{'tool':'generate_document','arguments':{}}])
+    manual=service.send_message(cid,text='创业',client_message_id='manual',session_id='owner')
+    service.run_automatic(cid,manual['active_run']['run_id'],session_id='owner')
+    assert not control.requests
+    auto=service.send_message(cid,text='保留观点',client_message_id='auto',session_id='owner',automatic=True)
+    service.run_automatic(cid,auto['active_run']['run_id'],session_id='other')
+    assert not control.requests
+    service._pending.clear()
+    service.run_automatic(cid,auto['active_run']['run_id'],session_id='owner')
+    assert not control.requests
+    assert service.get_conversation(cid,session_id='owner')['active_run']['state']=='cancelled'
+
+
+@pytest.mark.parametrize('daily_limit,actions,expected',[
+    (100,[{'tool':'search_sources','arguments':{**SEARCH['arguments'],'terms':['不存在']}},{'tool':'ask_user','arguments':{'question':'请补充来源'}}],'needs_input'),
+    (1,[SEARCH],'failed'),
+])
+def test_automatic_run_still_obeys_zero_hits_and_shared_limits(tmp_path,daily_limit,actions,expected):
+    service,control,generated,repo,cid=automatic_fixture(tmp_path,actions,max_daily_provider_requests=daily_limit)
+    started=service.send_message(cid,text='创业',client_message_id='auto',session_id='owner',automatic=True)
+    service.run_automatic(cid,started['active_run']['run_id'],session_id='owner')
+    assert service.get_conversation(cid,session_id='owner')['active_run']['state']==expected
+    assert generated.call_count==0
+
+
+def test_late_automatic_model_after_cancel_cannot_continue_or_generate(tmp_path):
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    service,control,generated,repo,cid=automatic_fixture(tmp_path,[SEARCH,{'tool':'generate_document','arguments':{}}])
+    entered,released=Event(),Event()
+    original=control.generate
+    async def delayed(request,cancellation):
+        entered.set();await asyncio.to_thread(released.wait,3)
+        return await original(request,cancellation)
+    control.generate=delayed
+    started=service.send_message(cid,text='创业',client_message_id='auto',session_id='owner',automatic=True)
+    run_id=started['active_run']['run_id']
+    with ThreadPoolExecutor() as pool:
+        future=pool.submit(service.run_automatic,cid,run_id,session_id='owner')
+        assert entered.wait(2)
+        service.cancel(cid,run_id,session_id='owner')
+        released.set();future.result(timeout=5)
+    assert service.get_conversation(cid,session_id='owner')['active_run']['state']=='cancelled'
+    assert len(control.requests)==1 and generated.call_count==0
+
+@pytest.mark.parametrize('replacement',['message','sources'])
+def test_new_message_or_source_change_revokes_automatic_run_grant(tmp_path,replacement):
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    service,control,generated,repo,cid=automatic_fixture(tmp_path,[SEARCH])
+    entered,released=Event(),Event()
+    original=control.generate
+    async def delayed(request,cancellation):
+        entered.set();await asyncio.to_thread(released.wait,3)
+        return await original(request,cancellation)
+    control.generate=delayed
+    started=service.send_message(cid,text='创业',client_message_id='auto',session_id='owner',automatic=True)
+    old_run=started['active_run']['run_id']
+    with ThreadPoolExecutor() as pool:
+        future=pool.submit(service.run_automatic,cid,old_run,session_id='owner')
+        assert entered.wait(2)
+        if replacement=='message':
+            new=service.send_message(cid,text='保留商业模式',client_message_id='new-manual',session_id='owner')
+            assert new['active_run']['state']=='waiting_approval'
+        else:
+            service.replace_sources(cid,sources=[],session_id='owner')
+        released.set();future.result(timeout=5)
+    current=service.get_conversation(cid,session_id='owner')
+    assert old_run not in service._pending and generated.call_count==0
+    assert len(control.requests)==1
+    if replacement=='message':
+        assert current['active_run']['run_id']!=old_run
+        service.run_automatic(cid,current['active_run']['run_id'],session_id='owner')
+        assert len(control.requests)==1
+    else:
+        assert current['active_run']['state']=='cancelled'
+
+def test_automatic_intermediate_preview_is_publicly_running_until_background_continues(tmp_path):
+    service,control,generated,repo,cid=automatic_fixture(tmp_path,[SEARCH,{'tool':'generate_document','arguments':{}}])
+    started=service.send_message(cid,text='创业',client_message_id='auto',session_id='owner',automatic=True)
+    run_id=started['active_run']['run_id']
+    service.advance(cid,run_id,session_id='owner')
+    intermediate=service.get_conversation(cid,session_id='owner')
+    assert intermediate['active_run']['state']=='running'
+    assert intermediate['active_run']['approval'] is None
+    assert service._store.get(cid,session_digest=digest('owner'))['state']['active_run']['state']=='waiting_approval'
+    service.run_automatic(cid,run_id,session_id='owner')
+    assert service.get_conversation(cid,session_id='owner')['active_run']['state']=='complete'
+
+
+def test_automatic_authorization_failure_stops_instead_of_remaining_publicly_running(tmp_path,monkeypatch):
+    service,control,generated,repo,cid=automatic_fixture(tmp_path,[SEARCH])
+    started=service.send_message(cid,text='创业',client_message_id='auto',session_id='owner',automatic=True)
+    run_id=started['active_run']['run_id']
+    service.advance(cid,run_id,session_id='owner')
+    def rejected(*args,**kwargs):raise PermissionError('agent_authorization_unavailable')
+    monkeypatch.setattr(service,'approve',rejected)
+    service.run_automatic(cid,run_id,session_id='owner')
+    final=service.get_conversation(cid,session_id='owner')
+    assert final['active_run']['state'] in {'cancelled','failed'}
+    assert final['active_run']['approval'] is None and run_id not in service._pending
+    assert len(control.requests)==1 and generated.call_count==0

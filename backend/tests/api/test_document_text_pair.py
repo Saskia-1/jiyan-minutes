@@ -57,8 +57,9 @@ def test_pair_endpoint_returns_one_immutable_version_without_managed_files(pair_
     assert pair["body"]["filename"].endswith("整理内容.txt")
     assert pair["reference"]["filename"].endswith("核查参考.txt")
     assert "新版本标题" not in pair["body"]["text"]
-    assert original.version_id in pair["body"]["text"] and original.version_id in pair["reference"]["text"]
-    assert "[证据1]" in pair["body"]["text"] and "[证据1]" in pair["reference"]["text"]
+    assert original.version_id not in pair["body"]["text"]
+    assert original.version_id in pair["reference"]["text"]
+    assert "[证据1]" not in pair["body"]["text"] and "[证据1]" in pair["reference"]["text"]
     assert set(tmp_path.rglob("*")) == before_files
 
 

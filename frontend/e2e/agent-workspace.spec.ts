@@ -58,7 +58,7 @@ test("保留工作台自然要求、修改撤销、取消零外发与同版本�
     const download = await event; expect(download.suggestedFilename()).toMatch(new RegExp(`${name}\\.txt$`));
     texts.push(await readFile((await download.path())!, "utf8"));
   }
-  expect(versions).toHaveLength(2); expect(new Set(versions).size).toBe(1); expect(texts[0]).toContain("[证据1]"); expect(texts[1]).toContain("[证据1]");
+  expect(versions).toHaveLength(2); expect(new Set(versions).size).toBe(1); expect(texts[0]).not.toContain("[证据1]"); expect(texts[1]).toContain("[证据1]");
   expect(starts).toBe(1); expect(expansions).toBe(0); expect(plans).toBe(1);
 });
 

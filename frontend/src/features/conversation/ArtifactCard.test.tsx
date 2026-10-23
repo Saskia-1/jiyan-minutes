@@ -27,3 +27,14 @@ it("does not create a blob when a download returns after the artifact was unmoun
  await screen.findByText("正文", { exact: true }); fireEvent.click(screen.getByRole("link", { name: "下载核查参考.txt" }));
  view.unmount(); finish(pair); await Promise.resolve(); expect(urls).not.toHaveBeenCalled();
 });
+it("shows the final result immediately without folded preview or delivery instructions", async () => {
+ const body = "讨论结论\n\n先验证需求，再根据反馈复盘。\n" + "保留不同观点，形成下一次行动。\n".repeat(40);
+ const textPair = vi.fn().mockResolvedValue({ ...pair, body: { filename: "正文.txt", text: body } });
+ render(<ArtifactCard api={{ documentTextPair: textPair } as unknown as LocalApiClient} message={{ ...message, artifact_revision: 2 }} />);
+ const result = await screen.findByText(/先验证需求，再根据反馈复盘/);
+ expect(result).toBeVisible(); expect(result.closest("details")).toBeNull();
+ expect(screen.queryByText("查看整理内容")).not.toBeInTheDocument(); expect(screen.queryByText("已完成")).not.toBeInTheDocument();
+ expect(screen.queryByText(/两份 TXT 来自同一份保留版本/)).not.toBeInTheDocument(); expect(screen.queryByText("旧摘录")).not.toBeInTheDocument();
+ expect(screen.getByText("第 2 版", { exact: true })).toBeVisible();
+ expect(screen.getByRole("link", { name: "下载整理内容.txt" })).toBeVisible(); expect(screen.getByRole("link", { name: "下载核查参考.txt" })).toBeVisible();
+});

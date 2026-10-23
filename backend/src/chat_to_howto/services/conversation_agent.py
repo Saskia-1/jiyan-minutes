@@ -1,4 +1,4 @@
-"""Session-owned, individually authorized bounded model/tool conversations.
+"""Session-owned, explicitly authorized bounded model/tool conversations.
 
 Only immutable request previews live in memory. Persistent state contains source
 identifiers and bounded user requests, never recalled excerpts or provider output.
@@ -113,6 +113,8 @@ class _Pending:
     conversation_id: str | None = None
     session_id: str | None = field(default=None, repr=False)
     source_expires_at: datetime | None = None
+    automatic: bool = False
+    authorized_sources: tuple[tuple[str, str], ...] = ()
 
 
 class ConversationAgentService:
@@ -197,6 +199,9 @@ class ConversationAgentService:
         if run:
             run = {key: run.get(key) for key in ('run_id', 'revision', 'state', 'stage', 'error_code',
                 'document_id', 'version_id', 'artifact_revision')}
+            if pending and pending.automatic and run['state'] == 'waiting_approval':
+                # The run-scoped grant will consume this frozen preview internally.
+                run['state'] = 'running'
             run['approval'] = deepcopy(pending.approval) if (run['state'] == 'waiting_approval'
                 and pending and not pending.approved) else None
         return dict(conversation_id=row['conversation_id'], title=state['title'], revision=row['revision'],
@@ -328,7 +333,9 @@ class ConversationAgentService:
             row['state']['sources'] = normalized
             return self._view(self._save(row, session_id))
 
-    def send_message(self, conversation_id, *, text, client_message_id, session_id):
+    def send_message(self, conversation_id, *, text, client_message_id, session_id, automatic=False):
+        if type(automatic) is not bool:
+            raise ValueError("invalid automatic flag")
         text, client_message_id = _text(text, 512), _text(client_message_id, 128)
         with self._lock:
             row = self._load(conversation_id, session_id)
@@ -357,7 +364,55 @@ class ConversationAgentService:
                     included_unit_ids=[], summary_type='mixed')
                 self._control_preview(state, session_id)
             row = self._save(row, session_id)
-            return self._view(row, self._pending.get(run['run_id']))
+            pending = self._pending.get(run['run_id'])
+            if automatic and pending and run['state'] == 'waiting_approval':
+                pending.automatic = True
+                pending.authorized_sources = self._source_binding(state)
+                return self.approve(conversation_id, run['run_id'],
+                    approval_id=pending.approval['approval_id'],
+                    preview_fingerprint=pending.approval['preview_fingerprint'],
+                    confirmed=True, session_id=session_id)
+            return self._view(row, pending)
+
+    @staticmethod
+    def _source_binding(state):
+        return tuple((source['kind'], source['id']) for source in state['sources'])
+
+    def run_automatic(self, conversation_id, run_id, *, session_id):
+        """Use only the new message's in-memory grant, bound to one run and scope."""
+        for _ in range(6):
+            with self._lock:
+                pending = self._pending.get(run_id)
+                if (not pending or not pending.automatic or pending.executing
+                        or pending.owner != digest(session_id)):
+                    return
+                row = self._load(conversation_id, session_id)
+                run = row['state'].get('active_run')
+                if not run or run['run_id'] != run_id or run['state'] in _TERMINAL:
+                    return
+                if pending.authorized_sources != self._source_binding(row['state']):
+                    self._stop(row['state'], session_id, code='source_scope_changed')
+                    self._save(row, session_id)
+                    return
+                if run['state'] == 'waiting_approval':
+                    try:
+                        self.approve(conversation_id, run_id,
+                            approval_id=pending.approval['approval_id'],
+                            preview_fingerprint=pending.approval['preview_fingerprint'],
+                            confirmed=True, session_id=session_id)
+                    except (PermissionError, ConversationError):
+                        current = self._load(conversation_id, session_id)
+                        active = current['state'].get('active_run')
+                        if (active and active['run_id'] == run_id
+                                and active['state'] not in _TERMINAL
+                                and self._pending.get(run_id) is pending):
+                            self._stop(current['state'], session_id,
+                                code='agent_authorization_unavailable')
+                            self._save(current, session_id)
+                        return
+                elif run['state'] != 'running':
+                    return
+            self.advance(conversation_id, run_id, session_id=session_id)
 
     def _control_preview(self, state, session_id):
         runtime, run = state['runtime'], state['active_run']
@@ -379,7 +434,9 @@ class ConversationAgentService:
             raise ConversationError('agent_preview_limit')
         self._pending[run['run_id']] = _Pending(digest(session_id), approval, request,
             old.token if old else CancellationToken(), conversation_id=runtime['conversation_id'],
-            session_id=session_id, source_expires_at=min(datetime.fromisoformat(s['expires_at']) for s in state['sources']))
+            session_id=session_id, source_expires_at=min(datetime.fromisoformat(s['expires_at']) for s in state['sources']),
+            automatic=old.automatic if old else False,
+            authorized_sources=old.authorized_sources if old else ())
         run.update(state='waiting_approval', stage='agent_authorization', approval=None,
             revision=run['revision']+1)
 
@@ -416,6 +473,8 @@ class ConversationAgentService:
                 or self._pending.get(run_id) is not pending):
             raise ProviderCancelled('cancelled')
         pending.token.raise_if_cancelled()
+        if pending.automatic and pending.authorized_sources != self._source_binding(row['state']):
+            raise ProviderCancelled('scope changed')
         self._sources(row['state'], session_id)
         return row
 
@@ -528,7 +587,8 @@ class ConversationAgentService:
             expires_at=expiry.isoformat())
         self._pending[run['run_id']] = _Pending(digest(session_id), approval, None,
             pending.token, generation_preview=preview, conversation_id=pending.conversation_id,
-            session_id=session_id, source_expires_at=pending.source_expires_at)
+            session_id=session_id, source_expires_at=pending.source_expires_at,
+            automatic=pending.automatic, authorized_sources=pending.authorized_sources)
         run.update(state='waiting_approval', stage='generation_authorization', revision=run['revision']+1)
 
     def _generate_document(self, cid, run_id, session_id, pending):

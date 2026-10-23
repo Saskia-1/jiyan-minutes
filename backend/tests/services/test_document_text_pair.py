@@ -76,12 +76,13 @@ def test_pair_has_utf8_plain_body_and_one_numbering_for_all_directions(direction
     pair = _render(_document(direction))
     body, reference = pair.body.text, pair.reference.text
     assert pair.document_id == "document:pair" and pair.version_id == "version:original"
-    assert "版本：1" in body and "version:original" in body
+    assert "版本：1" not in body and "version:original" not in body
+    assert "来源：AI 原始版本" not in body
     assert "版本：1" in reference and "version:original" in reference
     for part, suffix in ((pair.body, "整理内容.txt"), (pair.reference, "核查参考.txt")):
         assert part.filename.endswith(suffix) and "/" not in part.filename and ".." not in part.filename
         assert part.text.encode("utf-8").decode("utf-8") == part.text
-    assert set(re.findall(r"\[证据\d+\]", body)) == {"[证据1]", "[证据2]", "[证据3]"}
+    assert re.findall(r"\[证据\d+\]", body) == []
     assert re.findall(r"\[证据\d+\]", reference) == ["[证据1]", "[证据2]", "[证据3]"]
     assert "聊天合成摘录" not in body and "笔记合成摘录" not in body
     assert "未使用的摘录" not in reference
@@ -89,13 +90,13 @@ def test_pair_has_utf8_plain_body_and_one_numbering_for_all_directions(direction
     assert "非原聊天内容" in reference and "内部推理" not in reference
     assert "删除平台原文不会删除" in reference and "已经下载" in reference
     if direction == "how_to":
-        for value in ("准备资料 [证据1]", "核查段落 [证据2][证据1]", "检查截图 [证据3]",
-                      "参数甲", "条件乙", "注意丙", "结果丁", "仍需确认", "说法甲 [证据1]",
-                      "说法乙 [证据2]", "暂用截图 [证据3]"):
+        for value in ("准备资料", "核查段落", "检查截图",
+                      "参数甲", "条件乙", "注意丙", "结果丁", "仍需确认", "说法甲",
+                      "说法乙", "暂用截图"):
             assert value in body
     else:
-        assert "合成整理正文 [证据1][证据2]" in body
-        assert "合成截图正文 [证据3][证据1]" in body
+        assert "合成整理正文" in body
+        assert "合成截图正文" in body
 
 
 def test_reference_locates_mixed_chat_note_and_image_without_guessing_unknown_time():
@@ -114,7 +115,7 @@ def test_reference_locates_mixed_chat_note_and_image_without_guessing_unknown_ti
 def test_missing_reference_keeps_matching_number_and_does_not_fabricate_quote():
     document = _document().model_copy(update={"source_evidence": ()})
     pair = _render(document)
-    assert "[证据1]" in pair.body.text and "[证据1]" in pair.reference.text
+    assert "[证据1]" not in pair.body.text and "[证据1]" in pair.reference.text
     assert "依据记录缺失，无法核查" in pair.reference.text
     assert "聊天合成摘录" not in pair.reference.text
 
@@ -164,9 +165,12 @@ def test_user_edits_and_restored_user_edits_never_claim_original_refs_verify_rew
     assert "# 改写标题" not in pair.body.text
     assert "核查段落" not in pair.body.text
     assert "用户自行补充，没有核验。 [证据" not in pair.body.text
-    for part in (pair.body.text, pair.reference.text):
-        assert "结构化参考对应 AI 原始版本 version:original" in part
-        assert "未自动核验用户新增或改写的文字" in part
+    assert "结构化参考对应 AI 原始版本" not in pair.body.text
+    assert "未自动核验用户" not in pair.body.text
+    assert "AI 原始版本结构化参考索引" not in pair.body.text
+    assert "[证据" not in pair.body.text
+    assert "结构化参考对应 AI 原始版本 version:original" in pair.reference.text
+    assert "未自动核验用户新增或改写的文字" in pair.reference.text
     assert "聊天合成摘录" in pair.reference.text
 
 
@@ -181,6 +185,8 @@ def test_plain_structured_edit_uses_warning_and_original_reference_index():
         edited.version_id)
     assert "完全改写的步骤" in pair.body.text
     assert "完全改写的步骤 [证据" not in pair.body.text
+    assert "AI 原始版本结构化参考索引" not in pair.body.text
+    assert "未自动核验用户" not in pair.body.text
     assert "未自动核验用户新增或改写的文字" in pair.reference.text
 
 
@@ -199,7 +205,7 @@ def test_restoring_ai_original_preserves_citations_without_treating_it_as_a_user
         "restored_from_version_id": original.version_id})
     pair = _render(document.model_copy(update={"current_version": restored, "versions": (original, restored)}),
         restored.version_id)
-    assert "核查段落 [证据2][证据1]" in pair.body.text
+    assert "核查段落" in pair.body.text and "[证据" not in pair.body.text
     assert "未自动核验用户" not in pair.body.text
     assert "version:restored-ai" in pair.reference.text
 
@@ -222,5 +228,39 @@ def test_legacy_summary_all_groups_keep_corresponding_citations():
         "preparations": (), "steps": (), "checks": (), "conflicts": (), "missing_information": ()})
     version = document.current_version.model_copy(update={"content": content})
     pair = _render(document.model_copy(update={"current_version": version, "versions": (version,)}))
-    for value in ("核心合成摘要 [证据1]", "合成决定 [证据2]", "待解决问题 [证据3]"):
+    for value in ("核心合成摘要", "合成决定", "待解决问题"):
         assert value in pair.body.text
+    assert "[证据" not in pair.body.text
+    assert re.findall(r"\[证据\d+\]", pair.reference.text) == ["[证据1]", "[证据2]", "[证据3]"]
+
+
+def test_result_body_keeps_substantive_evidence_words_and_does_not_mutate_document():
+    document = _document()
+    original = document.current_version
+    content = original.content.model_copy(update={
+        "steps": (original.content.steps[0].model_copy(update={
+            "instruction": "收集证据材料并核查版本，不要删除证据文件",
+        }),),
+    })
+    version = original.model_copy(update={"content": content})
+    document = document.model_copy(update={"current_version": version, "versions": (version,)})
+    before = document.model_dump_json()
+    pair = _render(document)
+    assert "收集证据材料并核查版本，不要删除证据文件" in pair.body.text
+    assert "[证据" not in pair.body.text
+    assert "消息标识：chat:2" in pair.reference.text
+    assert document.model_dump_json() == before
+
+
+def test_result_body_preserves_literal_user_text_instead_of_removing_verification_words():
+    document = _document()
+    original = document.current_version
+    user_text = "# 我的证据笔记\n\n用户自己的证据附录说明：[待核查]是工作标签，[证据1]是原文中的编号。"
+    edited = original.model_copy(update={"version_id": "version:edit", "ordinal": 2,
+        "origin": "user_edited", "evidence_status": "unverified", "parent_version_id": original.version_id,
+        "content": original.content.model_copy(update={"user_text": user_text})})
+    pair = _render(document.model_copy(update={"current_version": edited, "versions": (original, edited)}), edited.version_id)
+    assert "用户自己的证据附录说明：[待核查]是工作标签，[证据1]是原文中的编号。" in pair.body.text
+    assert "AI 原始版本结构化参考索引" not in pair.body.text
+    assert "未自动核验用户" not in pair.body.text
+    assert "未自动核验用户新增或改写的文字" in pair.reference.text

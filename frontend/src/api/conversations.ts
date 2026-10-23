@@ -43,7 +43,7 @@ export function createConversationClient(request: ConversationRequest) {
     createAgentConversation: () => request(base, parseAgentConversation, {}),
     agentConversation: (conversation: string) => read(conversation),
     setAgentConversationSources: (conversation: string, sources: AgentSource[]) => read(conversation, "/sources", { sources: sources.map(source) }),
-    sendAgentMessage: async (conversation: string, text: string, client_message_id: string) => { if (!text.trim() || text.length > 512) return invalid(); id(client_message_id); return read(conversation, "/messages", { text, client_message_id }); },
+    sendAgentMessage: async (conversation: string, text: string, client_message_id: string, automatic = false) => { if (!text.trim() || text.length > 512 || typeof automatic !== "boolean") return invalid(); id(client_message_id); return read(conversation, "/messages", { text, client_message_id, ...(automatic ? { automatic: true } : {}) }); },
     approveAgentRun: async (conversation: string, run_id: string, approval_id: string, preview_fingerprint: string) => { id(approval_id); hash(preview_fingerprint); return read(conversation, `/runs/${id(run_id)}/approve`, { approval_id, preview_fingerprint, confirmed: true }); },
     cancelAgentRun: (conversation: string, run_id: string) => read(conversation, `/runs/${id(run_id)}/cancel`, {}),
   };

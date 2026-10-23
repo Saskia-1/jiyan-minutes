@@ -36,9 +36,8 @@ export function ArtifactCard({ api, message }: { api: LocalApiClient; message: A
     finally { if (token === epoch.current) { downloadLock.current = false; setDownloading(false); } }
   }
   return <section className="chat-artifact" aria-label={`整理成果 第${message.artifact_revision ?? 1}版`}>
-    <div className="chat-card-heading"><span aria-hidden="true">▤</span><div><h3>第 {message.artifact_revision ?? 1} 版整理</h3><p>两份 TXT 来自同一份保留版本，可另存到本地。</p></div><span className="chat-badge">已完成</span></div>
-    {preview ? <details><summary>查看整理内容</summary><pre className="chat-payload">{preview.body}</pre></details> : !error && <p role="status">正在读取保留版本…</p>}
-    <div className="chat-file-links"><a href="#" download={preview?.bodyName ?? "整理内容.txt"} aria-disabled={downloading} onClick={event => void download(event, "body")}>下载整理内容.txt</a><a href="#" download={preview?.referenceName ?? "核查参考.txt"} aria-disabled={downloading} onClick={event => void download(event, "reference")}>下载核查参考.txt</a></div>
-    {downloading && <p role="status">正在读取这份保留版本并准备下载…</p>}{error && <p role="alert">{error}</p>}
+    {preview ? <div className="chat-artifact-body">{preview.body}</div> : !error && <p role="status">正在读取整理内容…</p>}
+    <footer className="chat-artifact-footer"><span className="chat-artifact-version">第 {message.artifact_revision ?? 1} 版</span><div className="chat-file-links"><a href="#" download={preview?.bodyName ?? "整理内容.txt"} aria-disabled={downloading} onClick={event => void download(event, "body")}>下载整理内容.txt</a><a href="#" download={preview?.referenceName ?? "核查参考.txt"} aria-disabled={downloading} onClick={event => void download(event, "reference")}>下载核查参考.txt</a></div></footer>
+    {downloading && <p role="status">正在准备下载…</p>}{error && <p role="alert">{error}</p>}
   </section>;
 }

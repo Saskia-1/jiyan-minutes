@@ -57,3 +57,11 @@ def test_conversation_rest_requires_csrf_owner_safe_validation_and_background_ad
         assert replay.status_code==403
         assert replay.headers['cache-control']=='no-store'
         assert set(final)=={'conversation_id','title','revision','created_at','updated_at','sources','messages','active_run'}
+        for invalid in ['true', 1, None]:
+            rejected=client.post(base+'/messages',headers=headers,json={'text':'创业','client_message_id':'invalid','automatic':invalid})
+            assert rejected.status_code==422
+        auto=client.post(base+'/messages',headers=headers,json={'text':'保留商业模式','client_message_id':'automatic','automatic':True})
+        assert auto.status_code==200 and auto.json()['active_run']['state']=='running'
+        assert auto.json()['active_run']['approval'] is None
+        auto_final=client.get(base,headers=headers).json()
+        assert auto_final['active_run']['state']=='needs_input' and len(requests)==2
