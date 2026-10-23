@@ -22,7 +22,9 @@ test("简洁网页从文件上传到隔离 AI 生成、编辑、下载和刷新�
   await expect(chat.getByText("时间未知", { exact: true })).toHaveCount(3);
   await chat.getByRole("listitem").filter({ hasText: "无关的合成噪声" }).getByRole("checkbox", { name: "排除此消息" }).check();
 
-  const organize = page.getByRole("region", { name: "关键词与整理方向" });
+  await page.getByText("高级设置 · 手动关键词流程").click();
+  await page.getByRole("checkbox", { name: "使用手动关键词流程" }).check();
+  const organize = page.getByRole("region", { name: "整理任务" });
   await organize.getByRole("textbox", { name: "关键词" }).fill("歌单");
   const expansion = organize.getByRole("checkbox", { name: /自动扩展相关关键词/ });
   await expect(expansion).not.toBeChecked();

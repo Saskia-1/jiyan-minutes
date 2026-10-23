@@ -71,7 +71,6 @@ test("P1/P2 多会话导出、搜索和证据验证生成全链路，窄屏无�
   const outbound = generation.getByRole("region", { name: "AI 外发预览" });
   await expect(outbound).toContainText("fake（deterministic");
   await expect(outbound).toContainText("发送 3 条纯文本");
-  await outbound.getByText(/查看将要外发的完整脱敏文本/).click();
   await expect(outbound.getByRole("region", { name: "外发分块 1" })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await outbound.getByRole("checkbox", { name: /授权本次向外部 AI 发送/ }).check();

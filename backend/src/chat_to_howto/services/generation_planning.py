@@ -208,7 +208,9 @@ class GenerationScopeBuilder:
             generation_kind=selection.generation_kind,
             summary_type=selection.summary_type,
             allow_undated=selection.allow_undated,
-            topic=selection.topic,
+            topic=redact_outbound_text(
+                selection.topic, policy_revision=selection.redaction_policy_revision,
+            ),
             provider=selection.provider,
             model=selection.model,
             thinking=selection.thinking,
@@ -308,7 +310,9 @@ class MixedGenerationScopeBuilder:
             source_refs=selection.source_refs, included_unit_ids=selection.included_unit_ids,
             excluded_unit_ids=selection.excluded_unit_ids, mode=selection.mode,
             generation_kind="summary", summary_type=selection.summary_type,
-            topic=selection.topic, provider=selection.provider, model=selection.model,
+            topic=redact_outbound_text(
+                selection.topic, policy_revision=selection.redaction_policy_revision,
+            ), provider=selection.provider, model=selection.model,
             thinking=selection.thinking, reasoning_effort=selection.reasoning_effort,
             redaction_policy_revision=selection.redaction_policy_revision,
             include_undated=selection.include_undated, start_time=selection.start_time,

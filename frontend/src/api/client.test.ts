@@ -670,3 +670,28 @@ it.each([true, false])("主题扩展每次预览完整脱敏主题并独立授�
     expect(result.degraded).toBe(false);
   } else expect(result).toEqual({ topic: "合成主题", terms: ["合成主题"], degraded: true });
 });
+
+it("Agent 规划仅发自然要求到本地接口，双TXT请求绑定会话、CSRF与固定版本", async () => {
+  const calls: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = asRequest(input, init); const path = new URL(request.url).pathname; calls.push(path);
+    if (path === "/api/session") return json({ csrf_token: "csrf-agent", expires_at: "2099-01-01T00:00:00Z" });
+    expect(request.headers.get("X-CSRF-Token")).toBe("csrf-agent"); expect(init?.credentials).toBe("same-origin");
+    if (path === "/api/agent/plans") { expect(await request.json()).toEqual({ instruction: "整理创业的想法" });
+      return json({ instruction: "整理创业的想法", goal: "整理创业的想法", keywords: ["创业"], summary_type: "ideas", all_content: false, needs_clarification: false, notices: [] }); }
+    expect(path).toBe("/api/documents/document%3Aa/text-pair"); expect(await request.json()).toEqual({ version_id: "version:1" });
+    return json({ document_id: "document:a", version_id: "version:1", body: { filename: "标题-整理内容.txt", text: "中文正文" }, reference: { filename: "标题-核查参考.txt", text: "依据已不可查看" } });
+  }));
+  const api = createClient(); expect((await api.planAgent("整理创业的想法")).keywords).toEqual(["创业"]);
+  expect((await api.documentTextPair("document:a", "version:1")).reference.text).toBe("依据已不可查看");
+  expect(calls).toEqual(["/api/session", "/api/agent/plans", "/api/documents/document%3Aa/text-pair"]);
+});
+it("双TXT拒绝服务器返回不匹配版本或不安全文件名", async () => {
+  let safe = false;
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (new URL(asRequest(input, init).url).pathname === "/api/session") return json({ csrf_token: "csrf-pair", expires_at: "2099-01-01T00:00:00Z" });
+    return json({ document_id: "document:a", version_id: safe ? "version:other" : "version:1", body: { filename: safe ? "整理内容.txt" : "../整理内容.txt", text: "正文" }, reference: { filename: "核查参考.txt", text: "参考" } });
+  }));
+  const api = createClient(); await expect(api.documentTextPair("document:a", "version:1")).rejects.toBeInstanceOf(ApiError);
+  safe = true; await expect(api.documentTextPair("document:a", "version:1")).rejects.toBeInstanceOf(ApiError);
+});

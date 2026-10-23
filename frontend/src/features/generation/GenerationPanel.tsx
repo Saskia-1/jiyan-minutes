@@ -31,6 +31,9 @@ interface Props {
   retrievalTopic?: string;
   includedMessageIds?: string[];
   compact?: boolean;
+  autoPrepareRevision?: number;
+  prepareLabel?: string;
+  showPrepareAction?: boolean;
   direction?: SummaryType;
   prepareSelection?: () => Promise<GenerationSelectionRequest>;
   preparePreview?: () => Promise<GenerationPreview>;
@@ -109,6 +112,7 @@ export function ResultView({ value, verified = true }: { value: Pick<ValidatedGe
 
 export function GenerationPanel(props: Props) {
   const rawRevision = useRef(0);
+  const preparedRevision = useRef<number | undefined>(undefined);
   const [topic, setTopic] = useState("");
   const [mode, setMode] = useState<"fast" | "complete">("complete");
   const [summaryType, setSummaryType] = useState<SummaryType>("how_to");
@@ -149,6 +153,12 @@ export function GenerationPanel(props: Props) {
     currentScopeKey.current = scopeKey;
     setPreview(null); setConfirmed(false); setJob(null); setError("");
   }, [scopeKey]);
+
+  useEffect(() => {
+    if (props.autoPrepareRevision === undefined || preparedRevision.current === props.autoPrepareRevision || scopeLocked || props.disabled) return;
+    preparedRevision.current = props.autoPrepareRevision;
+    void quickPreview();
+  }, [props.autoPrepareRevision, props.disabled, scopeLocked, scopeKey]);
 
   function resetAuthorization() {
     setPreview(null); setConfirmed(false); setJob(null); setError("");
@@ -254,26 +264,26 @@ export function GenerationPanel(props: Props) {
     (!hasRetrievedScope || !!props.includedMessageIds?.length);
   const failedEvidence = job?.state === "failed" && ["evidence_invalid", "extraction_invalid", "extraction_incomplete", "provider_malformed"].includes(job.error_code || "");
   const outboundPreview = preview && <section className="outbound-preview" aria-label="AI 外发预览">
-    <h4>外发与预算确认</h4>
+    <h4>等待授权 · 外发与预算确认</h4>
     {preview.synthesis_planned && <p>预算包含一次跨段整合：先核对各段引用，再用本次原消息和中间提炼结果组织完整文档。中间结果在生成后产生，发送范围不会增加。</p>}
     {preview.cache_hit ? <p>已命中同一冻结范围的本地已验证缓存，本次预计不会外发。</p> : preview.will_send_external ?
       <p>将向 {preview.provider}（{preview.model}；思考模式：{preview.thinking === "enabled" ? `开启，强度 ${preview.reasoning_effort}` : "关闭"}）发送 {preview.message_count} 条纯文本；不发送账号凭据、附件文件或数据库。</p> :
       <p>范围内没有可发送的文本，将在本地返回依据不足。</p>}
     <p>字符数：{preview.character_count} · 最多 {preview.provider_calls} 次调用 · 预计输入不超过 {preview.estimated_input_tokens} token · 总输出上限 {preview.max_output_tokens} token</p>
     <p>费用：未知（以 Provider 实际账单为准） · 授权有效期：<time dateTime={preview.expires_at}>{safeDate(preview.expires_at)}</time></p>
-    {preview.outbound_payloads.length > 0 && <details><summary>查看将要外发的完整脱敏文本（{preview.outbound_payloads.length} 个分块）</summary>
+    {preview.outbound_payloads.length > 0 && <details open><summary>查看将要外发的完整脱敏文本（{preview.outbound_payloads.length} 个分块）</summary>
       <p>下方是确认后将作为 user content 发送的逐字节 UTF-8 文本。已处理明确标注的手机号、邮箱、QQ/微信号和秘密样式；自由文本不能保证识别所有个人信息，请人工核对。</p>
       {preview.outbound_payloads.map((payload, index) => <section key={index} aria-label={`外发分块 ${index + 1}`}><h5>分块 {index + 1}</h5><pre>{payload}</pre></section>)}
     </details>}
     <label className="check"><input type="checkbox" checked={confirmed} disabled={busy}
       onChange={event => setConfirmed(event.target.checked)} />{preview.will_send_external ?
         "授权本次向外部 AI 发送上述冻结范围纯文本" : "确认使用上述本地范围生成结果"}</label>
-    <div className="actions"><button type="button" disabled={!confirmed || busy} onClick={() => void begin()}>{busy ? "正在生成…" : "确认并生成"}</button>
+    <div className="actions"><button type="button" disabled={busy || (!!job && !TERMINAL.has(job.state))} onClick={resetAuthorization}>取消本次整理</button><button type="button" disabled={!confirmed || busy} onClick={() => void begin()}>{busy ? "正在生成…" : "确认并生成"}</button>
       {job && !TERMINAL.has(job.state) && <button type="button" disabled={busy} onClick={() => void cancel()}>取消生成</button>}</div>
   </section>;
   if (props.compact) return <>
-    <div className="actions"><button type="button" disabled={props.disabled || scopeLocked || !topicValue.trim()}
-      onClick={() => void quickPreview()}>{scopeLocked ? "正在整理…" : job?.state === "complete" ? "再次整理" : job?.state === "failed" || error ? "重新整理" : "开始整理"}</button>
+    <div className="actions">{props.showPrepareAction !== false && <button type="button" disabled={props.disabled || scopeLocked || !topicValue.trim()}
+      onClick={() => void quickPreview()}>{scopeLocked ? "正在整理…" : job?.state === "complete" ? "再次整理" : props.prepareLabel || (job?.state === "failed" || error ? "重新整理" : "开始整理")}</button>}
       {job && !TERMINAL.has(job.state) && <button type="button" disabled={busy} onClick={() => void cancel()}>取消整理</button>}
     </div>
     <p className="muted">先预览冻结范围与预算，确认后才会向已配置的 AI 服务发送所选正文。</p>

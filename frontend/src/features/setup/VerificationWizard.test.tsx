@@ -628,7 +628,7 @@ it("App 保留同源配置，首页四区且文件导入只通过系统选择器
   await screen.findByRole("region", { name: "聊天内容" });
   expect(api.requests.some(item => item.path === "/api/setup-options")).toBe(true);
   expect(screen.getAllByRole("heading", { level: 2 }).map(item => item.textContent)).toEqual([
-    "1. 聊天内容", "2. 关键词 / 整理方向", "3. 是否自行修改和补充？", "4. 预览与下载",
+    "1. 添加资料", "2. 交给记言整理", "3. 是否自行修改和补充？", "4. 预览与下载",
   ]);
   expect(screen.getByRole("radio", { name: "授权导入（即将支持）" })).toBeDisabled();
   expect(screen.queryByRole("combobox", { name: "保存位置" })).not.toBeInTheDocument();
@@ -646,7 +646,7 @@ it("浏览器下载无需批准输出目录，首页不擅自替换服务端根�
   await acknowledgment.click(screen.getByRole("checkbox", { name: "我已知悉" }));
   await acknowledgment.click(screen.getByRole("button", { name: "继续使用" }));
   expect(await screen.findByRole("region", { name: "聊天内容" })).toBeVisible();
-  expect(screen.getByRole("button", { name: "开始整理" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "理解并整理" })).toBeDisabled();
   expect(api.requests.some(item => item.path.endsWith("/verification-jobs"))).toBe(false);
   expect(api.requests.some(item => item.path.endsWith("/exports"))).toBe(false);
 });

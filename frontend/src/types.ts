@@ -300,3 +300,12 @@ export function validTimezone(value: string): boolean {
   if (!value) return false;
   try { new Intl.DateTimeFormat("en", { timeZone: value }); return true; } catch { return false; }
 }
+
+export interface AgentPlan {
+  instruction: string; goal: string; keywords: string[]; summary_type: SummaryType;
+  all_content: boolean; needs_clarification: boolean; notices: string[];
+}
+export interface DocumentTextPair {
+  document_id: string; version_id: string;
+  body: { filename: string; text: string }; reference: { filename: string; text: string };
+}

@@ -9,7 +9,7 @@ import {
   type ImportCommit, type ImportPreview, type ImportPreviewRequest, type ImportRecoveryPage,
   type ContentBatch, type ContentBatchPage, type ContentPreview, type ContentPreviewRequest,
   type ContentUnitEdit,
-  type MixedSearchPage, type MixedSearchRequest, type MixedGenerationRequest, type SourceRef,
+  type MixedSearchPage, type MixedSearchRequest, type MixedGenerationRequest, type SourceRef, type AgentPlan, type DocumentTextPair,
 } from "../types";
 
 export class ApiError extends Error {
@@ -819,6 +819,33 @@ export function createClient() {
     cancelExport: (id: string) => {
       if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)) return Promise.reject(new ApiError(0));
       return request(`/api/export-jobs/${encodeURIComponent(id)}/cancel`, parseExportJob, {});
+    },
+    planAgent: (instruction: string) => {
+      if (!instruction.trim() || instruction.length > 512) return Promise.reject(new ApiError(0));
+      return request("/api/agent/plans", (value: unknown): AgentPlan => {
+        if (!isObject(value) || typeof value.all_content !== "boolean" || typeof value.needs_clarification !== "boolean") return invalid();
+        exactPublicFields(value, ["instruction", "goal", "keywords", "summary_type", "all_content", "needs_clarification", "notices"]);
+        return { instruction: requiredString(value.instruction), goal: requiredString(value.goal),
+          keywords: parseStringList(value.keywords, true), summary_type: member(["viewpoints", "ideas", "how_to", "mixed"] as const, value.summary_type),
+          all_content: value.all_content, needs_clarification: value.needs_clarification, notices: parseStringList(value.notices, true) };
+      }, { instruction });
+    },
+    documentTextPair: async (id: string, version_id: string): Promise<DocumentTextPair> => {
+      if (![id, version_id].every(value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value))) throw new ApiError(0);
+      const pair = await request(`/api/documents/${encodeURIComponent(id)}/text-pair`, (value: unknown): DocumentTextPair => {
+        if (!isObject(value)) return invalid();
+        exactPublicFields(value, ["document_id", "version_id", "body", "reference"]);
+        const textFile = (file: unknown) => {
+          if (!isObject(file)) return invalid();
+          exactPublicFields(file, ["filename", "text"]);
+          const filename = requiredString(file.filename);
+          if (!filename.endsWith(".txt") || /[\\/:*?"<>|\x00-\x1f]/.test(filename) || typeof file.text !== "string") return invalid();
+          return { filename, text: file.text };
+        };
+        return { document_id: requiredString(value.document_id), version_id: requiredString(value.version_id),
+          body: textFile(value.body), reference: textFile(value.reference) };
+      }, { version_id });
+      return pair.document_id === id && pair.version_id === version_id ? pair : invalid();
     },
     previewImport: (value: ImportPreviewRequest) => {
       const hasFile = value.origin === "imported_file" && typeof value.filename === "string" && !!value.filename &&

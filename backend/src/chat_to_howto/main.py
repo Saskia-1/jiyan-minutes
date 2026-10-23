@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from chat_to_howto.api.agent import create_agent_router
 from chat_to_howto.api.documents import create_documents_router
 from chat_to_howto.api.document_exports import create_document_exports_router
 from chat_to_howto.api.deletion import create_deletion_router
@@ -902,6 +903,12 @@ def create_app(*, settings, database: Database, adapter_factory, secret_store, c
             ),
         )
 
+    app.include_router(
+        create_agent_router(
+            require_session=require_p1_session,
+            require_csrf=require_p1_csrf,
+        )
+    )
     app.include_router(
         create_imports_router(
             get_service=lambda: chat_imports,

@@ -474,3 +474,19 @@ def test_synthesis_uses_validated_drafts_and_cited_evidence_context_not_full_chr
         messages[0].message_id, messages[1].message_id
     )
     assert synthesis.reference_ids == ("E001", "E002")
+
+
+def test_full_instruction_topic_is_redacted_before_frozen_preview_and_payload():
+    from chat_to_howto.services.generation_scope import build_outbound_preview
+
+    message = _stored("instruction-pii", sent_at=datetime(2026, 9, 1, 1, tzinfo=UTC), text="创业建议")
+    scope = GenerationScopeBuilder(SnapshotRepositoryStub((message,))).build(
+        _selection(topic="整理与 user@example.com 和 13800138000 有关的创业观点"), session_id="owner",
+    )
+    preview = build_outbound_preview(scope)
+    plan = build_generation_plan(scope, max_chunk_input_tokens=8_000)
+    for payload in (preview.payload, plan.chunks[0].payload):
+        assert b"user@example.com" not in payload
+        assert b"13800138000" not in payload
+        assert "创业观点" in payload.decode()
+    assert scope.topic == "整理与 [已脱敏邮箱] 和 [已脱敏手机号] 有关的创业观点"

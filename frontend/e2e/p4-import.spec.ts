@@ -42,7 +42,6 @@ test("P4 粘贴导入进入现有搜索、排除、生成与文档链路", async
   await generation.getByRole("button", { name: "预览 AI 外发" }).click();
   const outbound = generation.getByRole("region", { name: "AI 外发预览" });
   await expect(outbound).toContainText("发送 1 条纯文本");
-  await outbound.getByText(/查看将要外发的完整脱敏文本/).click();
   const payload = outbound.getByRole("region", { name: "外发分块 1" });
   await expect(payload).toContainText("保留的浏览器测试步骤");
   await expect(payload).not.toContainText("应被排除的浏览器测试步骤");

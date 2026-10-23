@@ -298,3 +298,44 @@ it("删除文档前必须先查看影响并二次确认", async () => {
   expect(api.confirmDeletion).toHaveBeenCalledWith("deletion-plan:p3", "d".repeat(64));
   expect(await screen.findByRole("button", { name: "创建可编辑文档" })).toBeVisible();
 });
+
+it("两个 TXT 各自重新读取同一版本，其他页面清理后不缓存旧摘录", async () => {
+  const pair = { document_id: initial.document_id, version_id: initial.current_version.version_id,
+    body: { filename: "标题-整理内容.txt", text: "正文[核查1]" }, reference: { filename: "标题-核查参考.txt", text: "原文摘录" } };
+  const api = { documentTextPair: vi.fn().mockResolvedValue(pair) } as unknown as LocalApiClient;
+  const urls: Blob[] = []; vi.stubGlobal("URL", class extends URL {
+    static createObjectURL = vi.fn((blob: Blob) => { urls.push(blob); return `blob:txt-${urls.length}`; });
+    static revokeObjectURL = vi.fn();
+  });
+  const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+  const { DocumentEditor } = await import("./DocumentEditor"); const user = userEvent.setup();
+  render(<DocumentEditor compact api={api} initialDocument={initial} />);
+  await user.click(screen.getByRole("button", { name: "下载整理内容.txt" }));
+  vi.mocked(api.documentTextPair).mockResolvedValue({ ...pair, reference: { ...pair.reference, text: "依据已不可查看" } });
+  await user.click(screen.getByRole("button", { name: "下载核查参考.txt" }));
+  expect(api.documentTextPair).toHaveBeenCalledTimes(2);
+  expect(api.documentTextPair).toHaveBeenLastCalledWith(initial.document_id, initial.current_version.version_id);
+  const downloadedReference = await new Promise<string>(resolve => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.readAsText(urls[1]); });
+  expect(downloadedReference).toBe("依据已不可查看");
+  expect(urls).toHaveLength(2); expect(urls[0].type).toBe("text/plain;charset=utf-8");
+  fireEvent(window, new Event("minutes-raw-cleared"));
+  vi.mocked(api.documentTextPair).mockResolvedValue({ ...pair, reference: { ...pair.reference, text: "依据已不可查看" } });
+  await user.click(screen.getByRole("button", { name: "下载核查参考.txt" }));
+  expect(api.documentTextPair).toHaveBeenCalledTimes(3);
+  expect(screen.getByText(/原文已删除或到期/)).toBeVisible();
+  click.mockRestore(); vi.unstubAllGlobals();
+});
+
+it("清理期间返回的 TXT 配对不能发起过期依据下载", async () => {
+  let resolve!: (value: unknown) => void;
+  const api = { documentTextPair: vi.fn().mockReturnValue(new Promise(r => { resolve = r; })) } as unknown as LocalApiClient;
+  const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+  const { DocumentEditor } = await import("./DocumentEditor"); const user = userEvent.setup();
+  render(<DocumentEditor compact api={api} initialDocument={initial} />);
+  await user.click(screen.getByRole("button", { name: "下载核查参考.txt" }));
+  fireEvent(window, new Event("minutes-raw-cleared"));
+  resolve({ document_id: initial.document_id, version_id: initial.current_version.version_id,
+    body: { filename: "整理内容.txt", text: "正文" }, reference: { filename: "核查参考.txt", text: "不得恢复的摘录" } });
+  await waitFor(() => expect(screen.getByRole("button", { name: "下载核查参考.txt" })).toBeEnabled());
+  expect(click).not.toHaveBeenCalled(); click.mockRestore();
+});

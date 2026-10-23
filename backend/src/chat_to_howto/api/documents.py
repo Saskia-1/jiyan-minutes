@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from chat_to_howto.api.export_jobs import SafeValidationRoute
 from chat_to_howto.domain.documents import DocumentRecoveryPage, HowToDocument
 from chat_to_howto.domain.generation import GenerationResult
+from chat_to_howto.services.document_text_pair import DocumentTextPair, render_document_text_pair
 from chat_to_howto.services.documents import (
     DocumentAuthorizationError,
     DocumentConflict,
@@ -34,6 +35,10 @@ class CreateVersionRequest(_Request):
     parent_version_id: str = Field(min_length=1, max_length=128, pattern=_OPAQUE_PATTERN)
     content: GenerationResult
     change_summary: str = Field(default="", max_length=500)
+
+
+class TextPairRequest(_Request):
+    version_id: str = Field(min_length=1, max_length=128, pattern=_OPAQUE_PATTERN)
 
 
 class EmptyDocumentMutation(_Request):
@@ -114,6 +119,20 @@ def create_documents_router(
                 change_summary=request.change_summary,
                 session_id=session_id,
             )
+        except Exception as error:
+            raise _http_error(error) from None
+
+    @router.post("/{document_id}/text-pair", response_model=DocumentTextPair)
+    def get_text_pair(
+        document_id: Annotated[str, Path(pattern=_OPAQUE_PATTERN, max_length=128)],
+        request: TextPairRequest,
+        service: DocumentService = Depends(get_service),
+        session_id: str = Depends(require_session),
+        _csrf: object = Depends(require_csrf),
+    ) -> DocumentTextPair:
+        try:
+            document = service.get_document(document_id, session_id=session_id)
+            return render_document_text_pair(document, version_id=request.version_id)
         except Exception as error:
             raise _http_error(error) from None
 

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, type LocalApiClient } from "../../api/client";
 import type {
-  Conversation, ImportCommit, ImportOptions, ImportPlatformHint, ImportPreview,
+  ContentBatch, Conversation, ImportCommit, ImportOptions, ImportPlatformHint, ImportPreview,
 } from "../../types";
 import { ChatSearchPanel } from "../search/ChatSearchPanel";
 import { DeletionControl } from "../data/DeletionControl";
@@ -69,6 +69,7 @@ export function ChatImportPanel({ api, outputRootId, compact = false }: { api: L
   const [historyError, setHistoryError] = useState("");
   const [busy, setBusy] = useState(false);
   const [generationScopeLocked, setGenerationScopeLocked] = useState(false);
+  const [latestContentBatch, setLatestContentBatch] = useState<ContentBatch | null>(null);
   const [showContentPanel, setShowContentPanel] = useState(false);
   const [error, setError] = useState("");
   const conversations = useMemo(() => committed ? importedConversations(committed) : [], [committed]);
@@ -77,6 +78,7 @@ export function ChatImportPanel({ api, outputRootId, compact = false }: { api: L
   useEffect(() => {
     const clear = () => {
       rawRevision.current += 1;
+      setLatestContentBatch(null);
       setPreview(null); setConfirmed(false); setAcceptSkipped(false); setPastedText(""); setFile(null); setImports([]);
       setCommitted(value => value ? { ...value, analysis: undefined } : value);
       setRawEpoch(value => value + 1);
@@ -95,7 +97,7 @@ export function ChatImportPanel({ api, outputRootId, compact = false }: { api: L
         ...existing.filter(item => !page.imports.some(found => found.import_id === item.import_id)),
       ]);
       setCommitted(existing => page.imports.find(item => item.import_id === existing?.import_id)
-        || existing || page.imports[0] || null);
+        || existing || (!compact ? page.imports[0] : null) || null);
       setNextImportCursor(page.next_cursor);
     }).catch(() => { if (current) setHistoryError("无法恢复已导入批次；未更改本地数据。"); })
       .finally(() => { if (current) setHistoryBusy(false); });
@@ -186,7 +188,7 @@ export function ChatImportPanel({ api, outputRootId, compact = false }: { api: L
     {!compact && <h2>导入聊天记录</h2>}
     <details onToggle={event => setShowContentPanel(event.currentTarget.open)}>
       <summary>截图 OCR / 笔记文字导入</summary>
-      {showContentPanel && <ContentImportPanel api={api} busy={importLocked} onCommitted={() => undefined} />}
+      {showContentPanel && <ContentImportPanel api={api} busy={importLocked} onCommitted={setLatestContentBatch} />}
     </details>
     <p className="muted">支持 TXT、JSON、JSONL、CSV、XLSX、单文件 ZIP，也可以直接粘贴聊天。</p>
     <div className="import-origin" role="radiogroup" aria-label="导入方式">
@@ -264,7 +266,7 @@ export function ChatImportPanel({ api, outputRootId, compact = false }: { api: L
     </HistoryContainer>
   </>;
   if (compact) return <ImportedChatWorkspace key={committed?.import_id || "empty"} api={api} committed={committed}
-    sourceControls={importControls} outputRootId={outputRootId} importBusy={busy} onScopeLockChange={setGenerationScopeLocked} />;
+    latestContentBatch={latestContentBatch} onContentBatchConsumed={() => setLatestContentBatch(null)} sourceControls={importControls} outputRootId={outputRootId} importBusy={busy} onScopeLockChange={setGenerationScopeLocked} />;
   return <section className="panel import-panel" aria-label="导入聊天记录">
     {importControls}
     {committed && imports.some(item => item.import_id === committed.import_id) && <>

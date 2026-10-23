@@ -19,7 +19,9 @@ test("笔记从正式网页导入、逐条选择、隔离生成、证据、下�
 
   await page.reload();
   const restoredChat = page.getByRole("region", { name: "聊天内容" });
-  const organize = page.getByRole("region", { name: "关键词与整理方向" });
+  await page.getByText("高级设置 · 手动关键词流程").click();
+  await page.getByRole("checkbox", { name: "使用手动关键词流程" }).check();
+  const organize = page.getByRole("region", { name: "整理任务" });
   await organize.getByRole("textbox", { name: "关键词" }).fill("合成主题");
   await restoredChat.getByText("选择截图／笔记与聊天来源，预览混合检索").click();
   await restoredChat.getByRole("checkbox", { name: /截图／笔记批次 1/ }).check();

@@ -90,3 +90,15 @@ input[type="radio"] { width: 20px; height: 20px; margin: 3px 0; accent-color: #2
 .professional-extension { border-left: 3px solid #c4b286; padding: 6px 16px; margin-top: 24px; background: #fbf8ef; }
 .download-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 16px; margin: 24px 0; }
 .simple-workspace .generation-result { background: #fff; padding: 0; border: 0; }
+
+.brand-kicker, .agent-eyebrow { color: #5e746c; font-size: .78rem; font-weight: 600; letter-spacing: .09em; }
+.simple-main > header { padding: 12px 0 26px; }
+.simple-main > header h1 { letter-spacing: -.04em; font-size: clamp(2rem, 4vw, 3rem); margin: 4px 0 12px; }
+.agent-composer { background: linear-gradient(150deg, #fff 60%, #f2f7f2); }
+.agent-instruction { min-height: 112px; font-size: 1rem; line-height: 1.7; }
+.agent-task-card { border: 1px solid #ccd9d1; border-radius: 14px; background: #f7faf6; padding: 20px; margin: 22px 0; }
+.agent-task-card textarea { min-height: 74px; }
+.agent-composer > details { margin: 24px 0; }
+.text-pair-download { background: #f3f7f3; border-radius: 12px; margin: 24px 0 18px; padding: 18px; }
+.outbound-preview pre { max-height: 460px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 600px) { .agent-task-card, .text-pair-download { padding: 14px; } .agent-composer .fields { grid-template-columns: 1fr; } }

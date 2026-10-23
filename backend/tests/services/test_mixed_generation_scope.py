@@ -112,3 +112,34 @@ def test_mixed_note_uses_existing_consent_job_provider_and_document_pipeline(tmp
         assert document.source_evidence[0].quote == "合成主题的想法"
     finally:
         chat.close()
+
+
+def test_mixed_full_instruction_is_redacted_in_authorized_preview_and_provider_payload(tmp_path):
+    from chat_to_howto.providers.fake import FakeProvider
+    from chat_to_howto.services.generation_cache import GenerationCacheSettings
+    from chat_to_howto.services.generation_jobs import GenerationJobOrchestrator
+    from chat_to_howto.services.mixed_search import MixedSearchService
+
+    chat = ChatRepository(tmp_path / "chat.sqlite3")
+    content = ContentRepository(chat)
+    unit_id = "content:v1:note:" + "e" * 64
+    content.save_batch(batch_id="note-batch", session_digest=digest("owner"), created_at_utc="2026-10-12T00:00:00+00:00", images=[], units=[
+        {"unit_id": unit_id, "image_id": None, "kind": "note_passage", "group_id": "note-1", "source_order": 0, "text": "合成主题的想法", "sender_name": None, "sent_at": None},
+    ])
+    provider = FakeProvider()
+    settings = GenerationCacheSettings(prompt_version="synthetic", output_schema_version="synthetic", chunk_strategy_version="synthetic", max_chunk_input_tokens=8_000, provider_behavior_revision="synthetic")
+    orchestrator = GenerationJobOrchestrator(repository=chat, provider_factory=lambda _: provider, cache_settings=settings, clock=lambda: datetime(2026, 10, 12, tzinfo=timezone.utc), mixed_search=MixedSearchService(chat, content))
+    selection = _selection("note-batch", (unit_id,)).model_copy(update={"topic": "整理 user@example.com 和 13800138000 的想法"})
+    try:
+        preview = orchestrator.create_mixed_preview(selection, session_id="owner")
+        assert provider.call_count == 0
+        assert "user@example.com" not in preview.outbound_payloads[0]
+        assert "13800138000" not in preview.outbound_payloads[0]
+        assert "[已脱敏手机号]" in preview.outbound_payloads[0]
+        consent = orchestrator.issue_consent(preview.preview_id, session_id="owner", confirmed=True)
+        job = orchestrator.start_job(consent.consent_id, session_id="owner", idempotency_key="mixed-topic-pii")
+        assert orchestrator.run_job(job.job_id).state == "complete"
+        assert provider.call_count == 1
+        assert tuple(payload.decode("utf-8") for payload in provider.request_payloads) == preview.outbound_payloads
+    finally:
+        chat.close()

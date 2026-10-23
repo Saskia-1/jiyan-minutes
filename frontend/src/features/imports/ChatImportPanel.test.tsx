@@ -59,7 +59,11 @@ it("混合检索只发送明确勾选的来源，时间未知内容需单独选�
   const { ChatImportPanel } = await import("./ChatImportPanel");
   const user = userEvent.setup();
   render(<ChatImportPanel compact api={api} outputRootId="fixture-root" />);
-  await screen.findByText(/当前聊天/);
+  await user.click(screen.getByText("已导入批次", { exact: true }));
+  await user.click(await screen.findByRole("button", { name: "打开搜索与整理" }));
+  await screen.findByText(/当前聊天：/);
+  await user.click(screen.getByText("高级设置 · 手动关键词流程"));
+  await user.click(screen.getByRole("checkbox", { name: "使用手动关键词流程" }));
   await user.type(screen.getByRole("textbox", { name: "关键词" }), "音乐");
   await user.click(screen.getByText("选择截图／笔记与聊天来源，预览混合检索"));
   await user.click(await screen.findByRole("checkbox", { name: /截图／笔记批次 1/ }));
@@ -95,6 +99,8 @@ it("只有笔记正文、尚未导入聊天时也可逐项选择并进入生成�
   const { ChatImportPanel } = await import("./ChatImportPanel");
   const user = userEvent.setup();
   render(<ChatImportPanel compact api={api} outputRootId="fixture-root" />);
+  await user.click(screen.getByText("高级设置 · 手动关键词流程"));
+  await user.click(screen.getByRole("checkbox", { name: "使用手动关键词流程" }));
   await user.type(screen.getByRole("textbox", { name: "关键词" }), "合成主题");
   await user.click(screen.getByText("选择截图／笔记与聊天来源，预览混合检索"));
   await user.click(await screen.findByRole("checkbox", { name: /截图／笔记批次 1/ }));
@@ -123,12 +129,16 @@ it("简洁导入无时间聊天默认折叠，展开排除后只整理剩余消�
   const user = userEvent.setup();
   const { ChatImportPanel } = await import("./ChatImportPanel");
   render(<ChatImportPanel compact api={api} outputRootId="" />);
+  await user.click(screen.getByText("已导入批次", { exact: true }));
+  await user.click(await screen.findByRole("button", { name: "打开搜索与整理" }));
   const toggle = await screen.findByText(/展开聊天内容（2 条/);
   expect(toggle.closest("details")).not.toHaveAttribute("open");
   await user.click(toggle);
   expect(screen.getByText("收藏歌单")).toBeVisible();
   expect(screen.getAllByText("时间未知")).toHaveLength(2);
   await user.click(screen.getAllByRole("checkbox", { name: "排除此消息" })[1]);
+  await user.click(screen.getByText("高级设置 · 手动关键词流程"));
+  await user.click(screen.getByRole("checkbox", { name: "使用手动关键词流程" }));
   await user.type(screen.getByRole("textbox", { name: "关键词" }), "音乐");
   expect(screen.getByRole("checkbox", { name: /自动扩展相关关键词/ })).not.toBeChecked();
   await user.click(screen.getByRole("button", { name: "开始整理" }));
@@ -458,7 +468,11 @@ it("主题扩展降级仍拆分用户输入的多个关键词进行本地检索"
   const { ChatImportPanel } = await import("./ChatImportPanel");
   const user = userEvent.setup();
   render(<ChatImportPanel compact api={api} outputRootId="" />);
-  await screen.findByText(/当前聊天/);
+  await user.click(screen.getByText("已导入批次", { exact: true }));
+  await user.click(await screen.findByRole("button", { name: "打开搜索与整理" }));
+  await screen.findByText(/当前聊天：/);
+  await user.click(screen.getByText("高级设置 · 手动关键词流程"));
+  await user.click(screen.getByRole("checkbox", { name: "使用手动关键词流程" }));
   await user.type(screen.getByRole("textbox", { name: "关键词" }), "创业、就业");
   await user.click(screen.getByRole("checkbox", { name: /自动扩展相关关键词/ }));
   await user.click(screen.getByText("查看检索范围与关键词"));
@@ -484,6 +498,8 @@ it("清理原文后清空聊天缓存并保留已打开文档的未保存编辑"
   const { ChatImportPanel } = await import("./ChatImportPanel");
   const user = userEvent.setup();
   render(<ChatImportPanel compact api={api} outputRootId="" />);
+  await user.click(screen.getByText("已导入批次", { exact: true }));
+  await user.click(await screen.findByRole("button", { name: "打开搜索与整理" }));
   await user.click(await screen.findByText(/展开聊天内容（1 条/));
   expect(screen.getByText("待清理的原文")).toBeVisible();
   await user.click(screen.getByText("已保存的文档"));
@@ -496,7 +512,7 @@ it("清理原文后清空聊天缓存并保留已打开文档的未保存编辑"
   await waitFor(() => expect(screen.queryByText("待清理的原文")).not.toBeInTheDocument());
   expect(screen.queryByText("待清理的依据")).not.toBeInTheDocument();
   expect(screen.getByRole("textbox", { name: "完整文档" })).toHaveValue("# 未保存的新标题\n\n本地编辑");
-  expect(screen.getByRole("button", { name: "开始整理" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "理解并整理" })).toBeDisabled();
 });
 
 it("清理发生后忽略较早的导入预览响应，避免原文重新出现", async () => {
@@ -515,4 +531,33 @@ it("清理发生后忽略较早的导入预览响应，避免原文重新出现"
   await waitFor(() => expect(screen.getByRole("radio", { name: "导入文件" })).toBeEnabled());
   expect(screen.queryByRole("region", { name: "导入预览" })).not.toBeInTheDocument();
   expect(screen.getByRole("textbox", { name: "聊天文本" })).toHaveValue("");
+});
+
+it("Agent 首页恢复历史列表但不会自动把历史聊天加入新任务", async () => {
+ const api = { recoverImports: vi.fn().mockResolvedValue({ imports: [committed], next_cursor: null }), searchChats: vi.fn(), recoverDocuments: vi.fn().mockResolvedValue({ documents: [], next_cursor: null }) } as unknown as LocalApiClient;
+ const { ChatImportPanel } = await import("./ChatImportPanel"); render(<ChatImportPanel compact api={api} outputRootId="" />);
+ await userEvent.setup().click(screen.getByText("已导入批次", { exact: true }));
+ await screen.findByRole("button", { name: "打开搜索与整理" }); expect(api.searchChats).not.toHaveBeenCalled();
+ expect(screen.queryByText(/当前聊天：/)).not.toBeInTheDocument();
+});
+
+it("新笔记加入通知仅消费一次，用户取消后切换聊天不会自动选回", async () => {
+ const batch = { batch_id: "b".repeat(32), unit_count: 1, image_count: 0, images: [], created_at_utc: "2026-10-23T00:00:00Z" };
+ const notePreview = { preview_id: "a".repeat(32), preview_fingerprint: "f".repeat(64), suggested_kind: "note", status: "ready", expires_at_utc: "2099-01-01T00:00:00Z", images: [], warnings: [],
+   units: [{ unit_id: "candidate-0", kind: "note_passage", group_id: "note-1", text: "合成笔记", sender_name: null, sent_at: null, order: 0, image_ref: null }] };
+ const api = { recoverImports: vi.fn().mockResolvedValue({ imports: [committed], next_cursor: null }),
+   recoverContentBatches: vi.fn().mockResolvedValue({ items: [batch], next_cursor: null }),
+   recoverDocuments: vi.fn().mockResolvedValue({ documents: [], next_cursor: null }),
+   previewContentImport: vi.fn().mockResolvedValue(notePreview), commitContentPreview: vi.fn().mockResolvedValue(batch),
+   searchChats: vi.fn().mockResolvedValue({ results: [], next_cursor: null }) } as unknown as LocalApiClient;
+ const { ChatImportPanel } = await import("./ChatImportPanel"); const user = userEvent.setup(); render(<ChatImportPanel compact api={api} outputRootId="" />);
+ await user.click(screen.getByText("截图 OCR / 笔记文字导入")); await user.click(screen.getByRole("radio", { name: "粘贴笔记文字" }));
+ await user.type(screen.getByLabelText("笔记正文"), "合成笔记"); await user.click(screen.getByRole("button", { name: "识别并预览" }));
+ await user.click(await screen.findByRole("checkbox", { name: /确认以上正文/ })); await user.click(screen.getByRole("button", { name: "确认导入正文" }));
+ await screen.findByText(/本次已选择 1 个截图/);
+ await user.click(screen.getByText("选择截图／笔记与聊天来源，预览混合检索"));
+ const source = await screen.findByRole("checkbox", { name: /截图／笔记批次 1/ }); expect(source).toBeChecked(); await user.click(source);
+ await user.click(screen.getByText("已导入批次", { exact: true })); await user.click(await screen.findByRole("button", { name: "打开搜索与整理" }));
+ await user.click(screen.getByText("选择截图／笔记与聊天来源，预览混合检索"));
+ expect(await screen.findByRole("checkbox", { name: /截图／笔记批次 1/ })).not.toBeChecked();
 });

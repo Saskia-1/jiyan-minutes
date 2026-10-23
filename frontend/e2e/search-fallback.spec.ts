@@ -20,7 +20,9 @@ test("主题扩展失败时多个关键词仍召回无时间聊天，保留上�
   await preview.getByRole("checkbox", { name: /确认按此预览导入/ }).check();
   await preview.getByRole("button", { name: "确认导入本地索引" }).click();
   await expect(chat).toContainText("3 条消息");
-  const organize = page.getByRole("region", { name: "关键词与整理方向" });
+  await page.getByText("高级设置 · 手动关键词流程").click();
+  await page.getByRole("checkbox", { name: "使用手动关键词流程" }).check();
+  const organize = page.getByRole("region", { name: "整理任务" });
   await organize.getByRole("textbox", { name: "关键词" }).fill("创业、就业");
   await organize.getByRole("checkbox", { name: /自动扩展相关关键词/ }).check();
   await organize.getByText("查看检索范围与关键词").click();
@@ -32,7 +34,6 @@ test("主题扩展失败时多个关键词仍召回无时间聊天，保留上�
   await organize.getByRole("button", { name: "开始整理" }).click();
   const outbound = organize.getByRole("region", { name: "AI 外发预览" });
   await expect(outbound).toContainText("发送 3 条纯文本");
-  await outbound.getByText(/查看将要外发的完整脱敏文本/).click();
   await expect(outbound).toContainText("合成创业讨论");
   await expect(outbound).toContainText("合成就业讨论");
   await expect(outbound).toContainText("合成相邻条件");

@@ -23,6 +23,35 @@ export function DocumentResult({ api, generationJobId, initialDocument = null }:
   const [format, setFormat] = useState<"markdown" | "docx">("docx");
   const [sources, setSources] = useState(false);
   const [notice, setNotice] = useState("");
+  const pairRevision = useRef(0);
+  const downloadUrls = useRef<string[]>([]);
+  const currentVersionKey = `${doc?.document_id}:${doc?.current_version.version_id}`;
+  const versionKey = useRef(currentVersionKey); versionKey.current = currentVersionKey;
+  useEffect(() => {
+    const clearPair = () => {
+      pairRevision.current += 1;
+      downloadUrls.current.forEach(url => URL.revokeObjectURL(url)); downloadUrls.current = [];
+    };
+    clearPair(); window.addEventListener("minutes-raw-cleared", clearPair);
+    return () => { clearPair(); window.removeEventListener("minutes-raw-cleared", clearPair); };
+  }, [currentVersionKey]);
+  async function downloadText(kind: "body" | "reference") {
+    if (!doc || busy) return;
+    const revision = pairRevision.current; const requestedVersion = currentVersionKey;
+    setBusy(true); setError(""); setNotice("");
+    try {
+      const pair = await api.documentTextPair(doc.document_id, doc.current_version.version_id);
+      if (revision !== pairRevision.current || versionKey.current !== requestedVersion) return;
+      if (pair.document_id !== doc.document_id || pair.version_id !== doc.current_version.version_id) throw new Error("version_mismatch");
+      const file = pair[kind]; const blob = new Blob([file.text], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob); downloadUrls.current.push(url);
+      const anchor = window.document.createElement("a"); anchor.href = url; anchor.download = file.filename;
+      window.document.body.append(anchor); anchor.click(); anchor.remove();
+      setTimeout(() => { URL.revokeObjectURL(url); downloadUrls.current = downloadUrls.current.filter(value => value !== url); }, 1_000);
+      setNotice("已发起 TXT 下载，两份文件对应当前同一版本。");
+    } catch { setError("TXT 下载未完成，请重试。"); }
+    finally { setBusy(false); }
+  }
   const creation = useRef<Promise<HowToDocument> | null>(null);
   useEffect(() => {
     const clear = () => setDoc(value => value ? { ...value, source_deleted: true, source_evidence: [] } : value);
@@ -95,6 +124,10 @@ export function DocumentResult({ api, generationJobId, initialDocument = null }:
         <p className="muted">{doc.current_version.origin === "ai_generated" ? "AI 原始版本" : "用户版本 · 原始依据仅供对照，不代表已核验编辑内容"} · 版本 {doc.current_version.ordinal}</p>
         <button type="button" aria-expanded={previewing} onClick={() => setPreviewing(value => !value)}>预览结果</button>
         {previewing && <ResultView verified={doc.current_version.origin === "ai_generated"} value={{ result: doc.current_version.content, evidence: doc.source_evidence }} />}
+        <div className="text-pair-download" aria-label="双 TXT 下载"><div className="actions">
+          <button type="button" disabled={busy} onClick={() => void downloadText("body")}>下载整理内容.txt</button>
+          <button type="button" disabled={busy} onClick={() => void downloadText("reference")}>下载核查参考.txt</button>
+        </div><p className="muted">两个文件对应版本 {doc.current_version.ordinal}，核查参考包含资料定位与使用限制。删除平台原文不会删除你已下载的摘录。</p></div>
         <div className="download-controls"><label>下载格式<select value={format} disabled={busy} onChange={event => setFormat(event.target.value as "markdown" | "docx")}>
           <option value="docx">Word（DOCX）</option><option value="markdown">Markdown</option></select></label>
           <label className="check"><input type="checkbox" checked={sources} disabled={busy} onChange={event => setSources(event.target.checked)} />附带原始依据</label>

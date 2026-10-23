@@ -14,7 +14,7 @@ export default function App() {
     api.setupOptions().then(value => { if (active) setOptions(value); }).catch(() => { if (active) setFailed(true); });
     return () => { active = false; };
   }, [api]);
-  return <main className="simple-main"><header><h1>聊天记录整理</h1><p>从聊天中整理观点、想法与方法，保存为一份有用的文档。</p></header>
+  return <main className="simple-main"><header><p className="brand-kicker">本地资料 · 自然语言整理</p><h1>记言 · Minutes</h1><p>添加聊天、截图或笔记，告诉记言你想整理什么。</p></header>
     <ComplianceGate><RetentionNotice api={api} />
     {failed ? <p role="alert">无法读取本地配置，请检查本地服务后重新打开。</p> : options ? <ChatImportPanel compact outputRootId="" api={api} /> : <p role="status">正在读取本地配置…</p>}
     </ComplianceGate>

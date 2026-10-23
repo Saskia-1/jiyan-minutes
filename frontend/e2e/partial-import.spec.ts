@@ -30,7 +30,6 @@ test("部分解析成功时接受跳过后导入，并在刷新后保留实际�
   await expect(chat.getByText(/本次导入 1 条有效记录，跳过 1 条未解析记录/)).toBeVisible();
   await expect(chat).toContainText("1 条消息");
   await page.reload();
-  await page.getByText("导入其他聊天 / 管理已有聊天", { exact: true }).click();
   await page.getByText("已导入的聊天", { exact: true }).click();
   await expect(page.getByRole("region", { name: "聊天内容" })).toContainText("已导入 1 条有效记录，已跳过 1 条未解析记录。");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

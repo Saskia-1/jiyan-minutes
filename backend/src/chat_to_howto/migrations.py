@@ -1374,6 +1374,19 @@ _MIGRATION_15 = (
 )
 
 
+def _complete_retention_structures(connection: sqlite3.Connection) -> None:
+    """Complete earlier local v15 shapes without replaying document migration."""
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(chat_deletion_plans)")}
+    if "preserve_documents" not in columns:
+        connection.execute(
+            "ALTER TABLE chat_deletion_plans ADD COLUMN preserve_documents INTEGER NOT NULL DEFAULT 0 CHECK (preserve_documents IN (0,1))"
+        )
+    connection.execute("""CREATE TABLE IF NOT EXISTS chat_raw_retirements (
+        target_kind TEXT NOT NULL, target_id TEXT NOT NULL, session_digest TEXT NOT NULL,
+        created_at_utc TEXT NOT NULL, PRIMARY KEY(target_kind, target_id)
+    )""")
+
+
 MigrationAction = tuple[str, ...] | Callable[[sqlite3.Connection], None]
 MIGRATIONS: tuple[tuple[int, MigrationAction], ...] = (
     (1, _MIGRATION_1),
@@ -1391,6 +1404,7 @@ MIGRATIONS: tuple[tuple[int, MigrationAction], ...] = (
     (13, _MIGRATION_13),
     (14, _MIGRATION_14),
     (15, _MIGRATION_15),
+    (16, _complete_retention_structures),
 )
 
 
