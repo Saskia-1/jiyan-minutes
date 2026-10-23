@@ -144,10 +144,12 @@ class ContentImportService:
 
     def create_preview(
         self, images: tuple[ImageUpload, ...] | None, pasted_note: str | None,
-        *, session_id: str,
+        *, session_id: str, retain_pending: bool = False,
     ) -> ContentPreviewView:
         if not session_id:
             raise PermissionError("local session unavailable")
+        if type(retain_pending) is not bool:
+            raise ValueError("invalid_preview_retention_flag")
         if (images is None) == (pasted_note is None):
             raise ValueError("provide images or pasted note")
         now = self._now()
@@ -230,7 +232,7 @@ class ContentImportService:
         )
         view = view.model_copy(update={"preview_fingerprint": self._fingerprint(view, session_hash)})
         with self._lock:
-            self._pending = {key: value for key, value in self._pending.items() if value.view.expires_at_utc > now and value.session_digest != session_hash}
+            self._pending = {key: value for key, value in self._pending.items() if value.view.expires_at_utc > now and (retain_pending or value.session_digest != session_hash)}
             retained_bytes = sum(
                 sum(len(image.payload) for image in pending.images)
                 + sum(len(unit.text.encode("utf-8")) for unit in pending.view.units)

@@ -217,6 +217,7 @@ export interface ImportOptions {
 }
 export interface ImportPreviewRequest {
   origin: ImportOrigin; platform_hint: ImportPlatformHint; filename?: string;
+  retain_pending?: boolean;
   payload_base64?: string; pasted_text?: string; options: ImportOptions;
 }
 export interface ImportIssue { row_number: number; code: string }
@@ -261,6 +262,7 @@ export interface ContentBatch {
 }
 export interface ContentBatchPage { items: ContentBatch[]; next_cursor: string | null }
 export interface ContentPreviewRequest {
+  retain_pending?: boolean;
   images?: { filename: string; payload_base64: string; input_order: number }[];
   pasted_note?: string;
 }

@@ -28,6 +28,7 @@ class _ImageRequest(_Request):
 
 
 class CreateContentPreviewRequest(_Request):
+    retain_pending: bool = False
     images: list[_ImageRequest] | None = Field(default=None, max_length=20)
     pasted_note: str | None = Field(default=None, max_length=1_048_576, repr=False)
 
@@ -80,7 +81,7 @@ def create_content_imports_router(
     @router.post("/previews", response_model=ContentPreviewView, status_code=status.HTTP_201_CREATED)
     def create_preview(request: CreateContentPreviewRequest, service: ContentImportService = Depends(get_service), session_id: str = Depends(require_session), _csrf: object = Depends(require_csrf)) -> ContentPreviewView:
         try:
-            return service.create_preview(request.uploads(), request.pasted_note, session_id=session_id)
+            return service.create_preview(request.uploads(), request.pasted_note, session_id=session_id, retain_pending=request.retain_pending)
         except ValueError as error:
             raise _rejected(error) from None
 

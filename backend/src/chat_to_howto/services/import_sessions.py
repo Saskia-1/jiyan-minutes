@@ -182,15 +182,18 @@ class ChatImportService:
         platform_hint: ImportPlatformHint,
         options: ImportOptions,
         session_id: str,
+        retain_pending: bool = False,
     ) -> ImportPreviewView:
         if not session_id:
             raise ImportAuthorizationError("local session is unavailable")
+        if type(retain_pending) is not bool:
+            raise ValueError("invalid preview retention flag")
         now = self._now()
         session_digest = digest(session_id)
         with self._lock:
             self._discard_expired(now)
             self._ensure_capacity(
-                len(payload), replacing_session_digest=session_digest
+                len(payload), replacing_session_digest=None if retain_pending else session_digest
             )
         source = self._parser.preview(filename=filename, payload=payload)
         analyzed = self._analyzer.analyze(
@@ -220,9 +223,10 @@ class ChatImportService:
         with self._lock:
             self._discard_expired(now)
             self._ensure_capacity(
-                len(payload), replacing_session_digest=session_digest
+                len(payload), replacing_session_digest=None if retain_pending else session_digest
             )
-            self._discard_session_previews(session_digest)
+            if not retain_pending:
+                self._discard_session_previews(session_digest)
             self._pending[preview_id] = _PendingImport(
                 session_digest=session_digest,
                 filename=filename,

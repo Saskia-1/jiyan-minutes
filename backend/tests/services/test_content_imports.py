@@ -199,3 +199,35 @@ def test_image_order_and_groups_can_be_corrected_before_commit(service):
     batch = importer.commit_preview(revised.preview_id, revised.preview_fingerprint, session_id="owner")
     assert [image.sha256 for image in sorted(batch.images, key=lambda item: item.input_order)] == [sha256(second).hexdigest(), sha256(first).hexdigest()]
     assert {unit["group_id"] for unit in repository.list_units(batch.batch_id, session_digest=digest("owner"))} == {"one-note"}
+
+def test_retained_same_owner_content_previews_commit_independently_and_default_replaces(service):
+    importer,repository,_=service
+    previews=[importer.create_preview(None,f'第{i}份笔记',session_id='owner',retain_pending=True) for i in range(2)]
+    batches=[importer.commit_preview(p.preview_id,p.preview_fingerprint,session_id='owner') for p in previews]
+    assert len({batch.batch_id for batch in batches})==2
+    old=importer.create_preview(None,'旧笔记',session_id='owner',retain_pending=True)
+    importer.create_preview(None,'替换笔记',session_id='owner')
+    with pytest.raises(PermissionError):importer.commit_preview(old.preview_id,old.preview_fingerprint,session_id='owner')
+
+
+def test_retained_same_owner_content_previews_count_toward_capacity(service):
+    importer,_,_=service
+    previews=[importer.create_preview(None,f'笔记{i}',session_id='owner',retain_pending=True) for i in range(8)]
+    with pytest.raises(ValueError,match='preview_capacity_exceeded'):
+        importer.create_preview(None,'第九份',session_id='owner',retain_pending=True)
+    assert all(p.preview_id in importer._pending for p in previews)
+    importer.create_preview(None,'替换',session_id='owner')
+    assert len(importer._pending)==1
+
+
+def test_retained_same_owner_content_previews_count_toward_byte_budget(service):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    importer,_,_=service
+    first=importer.create_preview(None,'笔记',session_id='owner',retain_pending=True)
+    class ExistingLargePayload:
+        def __len__(self):return 128*1024*1024
+    importer._pending[first.preview_id]=replace(importer._pending[first.preview_id],images=(SimpleNamespace(payload=ExistingLargePayload()),))
+    with pytest.raises(ValueError,match='preview_capacity_exceeded'):
+        importer.create_preview(None,'新笔记',session_id='owner',retain_pending=True)
+    assert first.preview_id in importer._pending

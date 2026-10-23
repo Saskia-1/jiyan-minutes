@@ -313,3 +313,20 @@ def test_partial_commit_requires_skip_confirmation_and_reports_actual_counts(p0)
     recovered = p0.request("POST", "/api/imports/recovery", json={}).json()["imports"][0]
     assert (recovered["imported_count"], recovered["skipped_count"]) == (1, 1)
     assert recovered["raw_expires_at_utc"] == result.json()["raw_expires_at_utc"]
+
+def test_retain_pending_import_previews_commit_independently_and_flag_is_strict_bool(p0):
+    p0.start();p0.bootstrap()
+    for invalid in ['true',1,None]:
+        response=p0.request('POST','/api/imports/previews',json={**_request_body(),'retain_pending':invalid})
+        assert response.status_code==422
+    previews=[]
+    for _ in range(2):
+        response=p0.request('POST','/api/imports/previews',json={**_request_body(),'retain_pending':True})
+        assert response.status_code==201,response.text
+        previews.append(response.json())
+    snapshots=[]
+    for preview in previews:
+        committed=p0.request('POST',f"/api/imports/previews/{preview['preview_id']}/commit",json={'preview_fingerprint':preview['preview_fingerprint'],'confirmed':True})
+        assert committed.status_code==201,committed.text
+        snapshots.append(committed.json()['snapshot_id'])
+    assert len(set(snapshots))==2

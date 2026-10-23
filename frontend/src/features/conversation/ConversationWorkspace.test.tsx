@@ -103,14 +103,59 @@ describe("ConversationWorkspace", () => {
   await screen.findByText("任务已停止"); await act(async () => finish(waiting()));
   expect(screen.queryByRole("region", { name: "外发授权" })).not.toBeInTheDocument();
  });
- it("previews pasted notes locally and prevents sending while the note remains pending", async () => {
+ it("recognizes chat pasted into the composer locally without a separate note editor", async () => {
   const fixture = apiFixture(); await start(fixture.api);
-  fireEvent.click(screen.getByRole("button", { name: "粘贴笔记" })); fireEvent.change(screen.getByRole("textbox", { name: "笔记正文" }), { target: { value: "笔记内容" } });
-  fireEvent.change(screen.getByRole("textbox", { name: "发送消息" }), { target: { value: "整理" } });
+  expect(screen.queryByRole("button", { name: "粘贴笔记" })).not.toBeInTheDocument();
+  const composer = screen.getByRole("textbox", { name: "发送消息" });
+  fireEvent.change(composer, { target: { value: "整理讨论中的重点" } });
+  const pasted = "甲：\n先验证创业需求\n\n乙：\n再研究商业模式";
+  fireEvent.paste(composer, { clipboardData: { getData: () => pasted } });
+  const card = await screen.findByRole("region", { name: "导入确认" });
+  expect(fixture.mocks.previewImport).toHaveBeenCalledWith(expect.objectContaining({ origin: "paste", pasted_text: pasted, retain_pending: true }));
+  expect(fixture.mocks.sendAgentMessage).not.toHaveBeenCalled();
+  expect(composer).toHaveValue("整理讨论中的重点");
   expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
-  fireEvent.click(screen.getByRole("button", { name: "预览笔记" }));
-  const card = await screen.findByRole("region", { name: "导入确认" }); fireEvent.click(await within(card).findByRole("checkbox", { name: "我已核对预览并确认导入" })); fireEvent.click(within(card).getByRole("button", { name: "确认导入" }));
-  await screen.findByText(/实际导入 1 条/); expect(fixture.mocks.setAgentConversationSources).toHaveBeenCalledWith("c1", [{ kind: "content_batch", id: "b1", label: "粘贴笔记" }]);
+  fireEvent.click(await within(card).findByRole("checkbox", { name: "我已核对预览并确认导入" }));
+  expect(within(card).getByRole("button", { name: "确认导入" })).toBeDisabled();
+  fireEvent.click(within(card).getByRole("checkbox", { name: /接受跳过/ }));
+  fireEvent.click(within(card).getByRole("button", { name: "确认导入" }));
+  await screen.findByText(/实际导入 1 条，跳过 2 条/);
+  expect(fixture.mocks.setAgentConversationSources).toHaveBeenCalledWith("c1", [{ kind: "chat_snapshot", id: "s1", label: "对话框聊天记录" }]);
+ });
+
+ it("treats chat already entered in the composer as local source material before the 512 character instruction limit", async () => {
+  const fixture = apiFixture(); await start(fixture.api);
+  const pasted = `甲：\n${"完整聊天正文".repeat(110)}\n乙：\n后续讨论`;
+  fireEvent.change(screen.getByRole("textbox", { name: "发送消息" }), { target: { value: pasted } });
+  fireEvent.click(screen.getByRole("button", { name: "发送" }));
+  await screen.findByRole("region", { name: "导入确认" });
+  expect(fixture.mocks.sendAgentMessage).not.toHaveBeenCalled();
+  expect(screen.queryByText(/本次要求超过512字/)).not.toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "发送消息" })).toHaveValue("");
+ });
+
+ it("does not intercept ordinary pasted instructions or multiline task lists", async () => {
+  const fixture = apiFixture(); await start(fixture.api);
+  const composer = screen.getByRole("textbox", { name: "发送消息" });
+  const instruction = "整理要求：归纳观点\n输出格式：简洁列表";
+  expect(fireEvent.paste(composer, { clipboardData: { getData: () => instruction } })).toBe(true);
+  fireEvent.change(composer, { target: { value: instruction } }); fireEvent.click(screen.getByRole("button", { name: "发送" }));
+  await screen.findByRole("region", { name: "外发授权" });
+  expect(fixture.mocks.sendAgentMessage).toHaveBeenCalledWith("c1", instruction, expect.any(String));
+  expect(fixture.mocks.previewImport).not.toHaveBeenCalled();
+ });
+
+ it("ignores a pasted chat preview arriving after a conversation switch", async () => {
+  const fixture = apiFixture(); const preview = await fixture.mocks.previewImport(); let finish!: (value: typeof preview) => void;
+  fixture.mocks.previewImport.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  await start(fixture.api);
+  fireEvent.paste(screen.getByRole("textbox", { name: "发送消息" }), { clipboardData: { getData: () => "甲：\n创业\n乙：\n观点" } });
+  await waitFor(() => expect(fixture.mocks.previewImport).toHaveBeenCalledTimes(2));
+  fireEvent.click(screen.getByRole("button", { name: "第二段对话" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "第二段对话" })).toHaveAttribute("aria-current", "page"));
+  await act(async () => finish(preview));
+  expect(screen.queryByRole("region", { name: "导入确认" })).not.toBeInTheDocument();
+  expect(fixture.mocks.setAgentConversationSources).not.toHaveBeenCalled();
  });
  it("keeps two attachment previews independent and replaces the full source list after each confirmation", async () => {
   const fixture = apiFixture(); await start(fixture.api);
@@ -142,8 +187,8 @@ describe("ConversationWorkspace", () => {
  it("offers a separate explicit note preview for TXT with no parsed chat messages", async () => {
   const fixture = apiFixture(); const preview = await fixture.mocks.previewImport(); preview.analysis.parsed_count = 0; preview.ready_to_commit = false; fixture.mocks.previewImport.mockResolvedValue(preview); await start(fixture.api);
   fireEvent.change(screen.getByLabelText("添加资料"), { target: { files: [new File(["普通笔记正文"], "资料.txt")] } });
-  fireEvent.click(await screen.findByRole("button", { name: "改为笔记预览" }));
-  await screen.findByText("笔记内容"); expect(fixture.mocks.previewContentImport).toHaveBeenCalledWith({ pasted_note: "普通笔记正文" }); expect(fixture.mocks.commitContentPreview).not.toHaveBeenCalled();
+  fireEvent.click(await screen.findByRole("button", { name: "按普通文本预览" }));
+  await screen.findByText("笔记内容"); expect(fixture.mocks.previewContentImport).toHaveBeenCalledWith({ pasted_note: "普通笔记正文", retain_pending: true }); expect(fixture.mocks.commitContentPreview).not.toHaveBeenCalled();
  });
 
  it("requires local correction of uncertain OCR before confirming an image import", async () => {

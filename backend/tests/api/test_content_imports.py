@@ -72,3 +72,20 @@ def test_chat_correction_accepts_explicit_timestamp_without_fabricating_missing_
     assert revised.status_code == 200, revised.text
     assert revised.json()["units"][0]["sent_at"] == "2026-10-12T10:00:00+08:00"
     assert revised.json()["units"][1]["sent_at"] is None
+
+def test_retain_pending_content_previews_commit_independently_and_flag_is_strict_bool(p0):
+    p0.start();p0.bootstrap()
+    for invalid in ['true',1,None]:
+        response=p0.request('POST','/api/content-imports/previews',json={'pasted_note':'笔记','retain_pending':invalid})
+        assert response.status_code==422
+    previews=[]
+    for index in range(2):
+        response=p0.request('POST','/api/content-imports/previews',json={'pasted_note':f'第{index}份笔记','retain_pending':True})
+        assert response.status_code==201,response.text
+        previews.append(response.json())
+    batches=[]
+    for preview in previews:
+        committed=p0.request('POST',f"/api/content-imports/previews/{preview['preview_id']}/commit",json={'preview_fingerprint':preview['preview_fingerprint'],'confirmed':True})
+        assert committed.status_code==201,committed.text
+        batches.append(committed.json()['batch_id'])
+    assert len(set(batches))==2

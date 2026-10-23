@@ -31,6 +31,7 @@ class _Request(BaseModel):
 
 
 class CreateImportPreviewRequest(_Request):
+    retain_pending: bool = False
     origin: ImportOrigin
     platform_hint: ImportPlatformHint = "generic"
     filename: str | None = Field(default=None, min_length=1, max_length=255)
@@ -115,6 +116,7 @@ def create_imports_router(
             return service.create_preview(
                 filename=filename,
                 payload=payload,
+                retain_pending=request.retain_pending,
                 origin=request.origin,
                 platform_hint=request.platform_hint,
                 options=request.options,

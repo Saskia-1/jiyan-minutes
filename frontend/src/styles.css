@@ -107,7 +107,7 @@ input[type="radio"] { width: 20px; height: 20px; margin: 3px 0; accent-color: #2
 .conversation-app { --chat-ink: #253b35; --chat-muted: #7c8880; --chat-paper: #fcfcf8; color: var(--chat-ink); background: var(--chat-paper); }
 .conversation-app > div > .muted { margin: 0; padding: 7px 24px; background: #edf0e9; font-size: .73rem; text-align: center; }
 .conversation-app > div > .muted button { min-height: 24px; margin-left: 12px; padding: 0; border: 0; color: #526e60; background: transparent; font-size: inherit; font-weight: 500; text-decoration: underline; }
-.conversation-app .conversation-shell { display: grid; grid-template-columns: 248px minmax(0, 1fr); height: calc(100dvh - 73px); min-height: 540px; }
+.conversation-app .conversation-shell { display: grid; grid-template-columns: 248px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); overflow: hidden; height: calc(100dvh - 73px); min-height: 540px; }
 .conversation-app .chat-sidebar { display: flex; flex-direction: column; min-width: 0; padding: 30px 18px 22px; background: #eef0e9; border-right: 1px solid #e3e7dd; overflow-y: auto; }
 .conversation-app .chat-brand { padding: 0 14px; color: #203e31; text-decoration: none; font-family: ui-serif, "Songti SC", "STSong", serif; font-size: 1.5rem; letter-spacing: .05em; font-weight: 600; }
 .conversation-app .chat-brand span { font-family: inherit; font-size: .85rem; font-weight: 400; letter-spacing: -.01em; margin-left: 4px; }
@@ -120,7 +120,7 @@ input[type="radio"] { width: 20px; height: 20px; margin: 3px 0; accent-color: #2
 .conversation-app .chat-sidebar-footer { margin-top: auto; padding: 48px 14px 0; font-size: .75rem; color: #63755f; }
 .conversation-app .chat-sidebar-footer p { margin-bottom: 0; padding-left: 15px; font-size: .68rem; line-height: 1.9; color: #929b8d; }
 .conversation-app .chat-local-dot { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: #648562; margin-right: 9px; vertical-align: middle; }
-.conversation-app .chat-main { display: flex; min-width: 0; flex-direction: column; height: 100%; }
+.conversation-app .chat-main { display: flex; min-width: 0; min-height: 0; overflow: hidden; flex-direction: column; height: 100%; }
 .conversation-app .chat-topbar { max-width: none; display: flex; align-items: center; gap: 14px; margin: 0; padding: 21px 34px; border-bottom: 1px solid #eff0e9; flex-shrink: 0; }
 .conversation-app .chat-topbar strong { display: block; font-weight: 550; font-size: .88rem; }
 .conversation-app .chat-topbar div > span { display: block; color: #8f978c; font-size: .66rem; margin-top: 2px; }
@@ -173,17 +173,12 @@ input[type="radio"] { width: 20px; height: 20px; margin: 3px 0; accent-color: #2
 .conversation-app .chat-composer-toolbar, .conversation-app .chat-attach-actions { display: flex; align-items: center; gap: 9px; }
 .conversation-app .chat-composer-toolbar { justify-content: space-between; }
 .conversation-app .chat-attach-button { min-height: 36px; width: 36px; padding: 0; border: 0; background: transparent; color: #7d9271; font-size: 1.6rem; font-weight: 300; }
-.conversation-app .chat-note-button { padding: 3px 9px; min-height: 34px; border: 0; background: transparent; color: #87997a; font-size: .72rem; font-weight: 400; }
 .conversation-app .chat-file-input { display: none !important; }
 .conversation-app .chat-send { padding: 5px 13px; min-height: 36px; background: #6e875c; border: 1px solid #6e875c; border-radius: 9px; font-size: .9rem; font-weight: 400; }
 .conversation-app .chat-send span { font-size: .72rem; margin-left: 6px; }
 .conversation-app .chat-send:disabled { background: #e9eee2; border-color: #e9eee2; color: #b3bea6; }
 .conversation-app .chat-composer-hint { margin: 9px 0 0; text-align: center; color: #a3ac99; font-size: .62rem; }
 .conversation-app .chat-pending-note { margin: 0 0 8px; font-size: .75rem; color: #a18753; }
-.conversation-app .chat-note-editor { padding: 18px; border: 1px solid #dbe3d2; border-radius: 11px; background: #f5f7ef; margin-bottom: 10px; }
-.conversation-app .chat-note-editor label { font-size: .8rem; }
-.conversation-app .chat-note-editor textarea { min-height: 100px; max-height: 180px; }
-.conversation-app .chat-inline-actions { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
 .conversation-app .chat-settings { background: #eef0e9; border-top: 1px solid #dfe5d6; padding: 0 25px; font-size: .72rem; color: #7c8d71; }
 .conversation-app .chat-settings > summary { min-height: 36px; padding: 8px 0; cursor: pointer; }
 .conversation-app .chat-settings-content { max-width: 1000px; margin: 0 auto; padding: 30px 0; font-size: .9rem; color: #253b35; }

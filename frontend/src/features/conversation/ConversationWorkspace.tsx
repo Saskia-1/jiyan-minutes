@@ -5,6 +5,7 @@ import type { ContentPreview, ContentUnitEdit } from "../../types";
 import { ApprovalCard } from "./ApprovalCard";
 import { ArtifactCard } from "./ArtifactCard";
 import { AttachmentCard, type PendingAttachment } from "./AttachmentCard";
+import { composerChatText } from "./composerChat";
 const active = (value: AgentConversation | null) => value?.active_run && ["running", "waiting_approval"].includes(value.active_run.state) ? value.active_run : null;
 function base64(file: File): Promise<string> {
   return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => { const value = String(reader.result); resolve(value.slice(value.indexOf(",") + 1)); }; reader.onerror = () => reject(new Error("file_read_failed")); reader.readAsDataURL(file); });
@@ -31,8 +32,6 @@ export function ConversationWorkspace({ api }: { api: LocalApiClient }) {
   const [error, setError] = useState("");
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
-  const [noteOpen, setNoteOpen] = useState(false);
-  const [note, setNote] = useState("");
   const [viewEpoch, setViewEpoch] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -43,7 +42,7 @@ export function ConversationWorkspace({ api }: { api: LocalApiClient }) {
     current.current = value; setConversation(value);
     setSessions(items => [value, ...items.filter(item => item.conversation_id !== value.conversation_id)]);
   }
-  function clearLocal() { setAttachments([]); setText(""); setNote(""); setNoteOpen(false); setError(""); setViewEpoch(value => value + 1); if (fileInput.current) fileInput.current.value = ""; }
+  function clearLocal() { setAttachments([]); setText(""); setError(""); setViewEpoch(value => value + 1); if (fileInput.current) fileInput.current.value = ""; }
   async function stopOld(value: AgentConversation | null) { const run = active(value); if (value && run) await api.cancelAgentRun(value.conversation_id, run.run_id); }
   async function openConversation(id?: string) {
     const previous = current.current;
@@ -115,20 +114,33 @@ export function ConversationWorkspace({ api }: { api: LocalApiClient }) {
       if (file.size > (image ? 15 : 64) * 1024 * 1024) { patchAttachment(key, { state: "error", error: image ? "图片超过 15 MiB 上限。" : "文件超过 64 MiB 上限。" }, token); continue; }
       try {
         const payload_base64 = await base64(file); if (!valid(token)) return;
-        if (image) { const content = await api.previewContentImport({ images: [{ filename: file.name, payload_base64, input_order: 0 }] }); patchAttachment(key, { state: "ready", content }, token); }
-        else { const chat = await api.previewImport({ origin: "imported_file", platform_hint: "generic", filename: file.name, payload_base64, options: { timezone: "Asia/Shanghai", default_conversation_name: file.name.replace(/\.[^.]+$/, "") } }); const noteFallback = chat.analysis.parsed_count === 0 && /\.txt$/i.test(file.name) ? await readText(file) : undefined; patchAttachment(key, { state: "ready", chat, noteFallback }, token); }
+        if (image) { const content = await api.previewContentImport({ images: [{ filename: file.name, payload_base64, input_order: 0 }], retain_pending: true }); patchAttachment(key, { state: "ready", content }, token); }
+        else { const chat = await api.previewImport({ origin: "imported_file", platform_hint: "generic", filename: file.name, payload_base64, retain_pending: true, options: { timezone: "Asia/Shanghai", default_conversation_name: file.name.replace(/\.[^.]+$/, "") } }); const noteFallback = chat.analysis.parsed_count === 0 && /\.txt$/i.test(file.name) ? await readText(file) : undefined; patchAttachment(key, { state: "ready", chat, noteFallback }, token); }
       } catch (caught) {
         const noteFallback = /\.txt$/i.test(file.name) ? await readText(file).catch(() => "") : undefined;
-        patchAttachment(key, { state: "error", error: safeError(caught, image ? "图片解析失败，请重试或粘贴笔记。" : "无法按聊天记录解析。请核对文件格式；普通 TXT 文字可以改为笔记预览。"), noteFallback }, token);
+        patchAttachment(key, { state: "error", error: safeError(caught, image ? "图片解析失败，请重试或上传文字文件。" : "无法按聊天记录解析。请核对文件格式；普通 TXT 文字可以按普通文本预览。"), noteFallback }, token);
       }
     } } finally { if (valid(token)) { lock.current = false; setBusy(false); } }
   }
-  async function prepareNote(value: string, key: string = crypto.randomUUID()) {
+  async function preparePastedChat(value: string, clearDraft = false) {
+    if (lock.current || !current.current || active(current.current) || !value.trim()) return;
+    if (new Blob([value]).size > 64 * 1024 * 1024) { setError("聊天记录超过 64 MiB 上限，请分批添加；内容尚未发送。"); return; }
+    const token = epoch.current; const key = crypto.randomUUID();
+    lock.current = true; setBusy(true); setError("");
+    setAttachments(items => [...items, { key, label: "对话框聊天记录", state: "preparing" }]);
+    try {
+      const chat = await api.previewImport({ origin: "paste", platform_hint: "generic", pasted_text: value, retain_pending: true, options: { timezone: "Asia/Shanghai", default_conversation_name: "对话框聊天记录" } });
+      patchAttachment(key, { state: "ready", chat, noteFallback: chat.analysis.parsed_count === 0 ? value : undefined }, token);
+      if (valid(token) && clearDraft) setText("");
+    } catch (caught) { patchAttachment(key, { state: "error", error: safeError(caught, "聊天识别失败，请检查消息格式，或按普通文本预览。"), noteFallback: value }, token); }
+    finally { if (valid(token)) { lock.current = false; setBusy(false); } }
+  }
+  async function prepareTextFallback(value: string, key: string) {
     if (lock.current || !current.current || active(current.current) || !value.trim()) return;
     const token = epoch.current; lock.current = true; setBusy(true); setError("");
-    setAttachments(items => items.some(item => item.key === key) ? items.map(item => item.key === key ? { key, label: item.label, state: "preparing" } : item) : [...items, { key, label: "粘贴笔记", state: "preparing" }]);
-    try { const content: ContentPreview = await api.previewContentImport({ pasted_note: value }); patchAttachment(key, { state: "ready", content }, token); if (valid(token)) { setNote(""); setNoteOpen(false); } }
-    catch (caught) { patchAttachment(key, { state: "error", error: safeError(caught, "笔记预览失败，请移除后重试。") }, token); }
+    setAttachments(items => items.map(item => item.key === key ? { key, label: item.label, state: "preparing" } : item));
+    try { const content: ContentPreview = await api.previewContentImport({ pasted_note: value, retain_pending: true }); patchAttachment(key, { state: "ready", content }, token); }
+    catch (caught) { patchAttachment(key, { state: "error", error: safeError(caught, "文本预览失败，请移除后重试。"), noteFallback: value }, token); }
     finally { if (valid(token)) { lock.current = false; setBusy(false); } }
   }
   async function reviseAttachment(item: PendingAttachment, edits: ContentUnitEdit[]) {
@@ -166,7 +178,13 @@ export function ConversationWorkspace({ api }: { api: LocalApiClient }) {
   const running = !!active(conversation);
   const pending = attachments.some(item => item.state !== "committed");
   const disabled = loading || busy || !conversation;
-  function send() { if (!text.trim() || disabled || running || pending || (noteOpen && note.trim())) return; if (text.length > 512) { setError("本次要求超过512字，请简化后再发送；内容尚未发送。"); return; } const draft = text; void mutate(value => api.sendAgentMessage(value.conversation_id, draft, crypto.randomUUID()), "消息未发送成功，请核对来源或简化要求后重试。", () => setText("")); }
+  function send() {
+    if (!text.trim() || disabled || running || pending) return;
+    const chat = composerChatText(text);
+    if (chat !== null) { void preparePastedChat(chat, true); return; }
+    if (text.length > 512) { setError("本次要求超过512字，请简化后再发送；内容尚未发送。"); return; }
+    const draft = text; void mutate(value => api.sendAgentMessage(value.conversation_id, draft, crypto.randomUUID()), "消息未发送成功，请核对来源或简化要求后重试。", () => setText(""));
+  }
   return <div className={`conversation-shell${sidebarOpen ? " sidebar-open" : ""}`}>
     <aside className="chat-sidebar" aria-label="会话列表"><h2 className="chat-brand-title"><a className="chat-brand" href="/">记言 <span>· Minutes</span></a></h2><button className="chat-new" type="button" aria-label="新建对话" onClick={() => void openConversation()}>＋ 新建对话</button><p className="chat-sidebar-heading">本地对话</p><nav>{sessions.map(item => <button key={item.conversation_id} type="button" aria-current={conversation?.conversation_id === item.conversation_id ? "page" : undefined} onClick={() => { if (current.current?.conversation_id !== item.conversation_id) void openConversation(item.conversation_id); else setSidebarOpen(false); }}>{item.title}</button>)}</nav><div className="chat-sidebar-footer"><span className="chat-local-dot" />资料保存在本机<p>原文保留 7 天<br />整理文档长期保留</p></div></aside>
     <div className="chat-main"><header className="chat-topbar"><button type="button" className="chat-menu-button" aria-label="切换会话列表" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(value => !value)}>☰</button><div><strong>{conversation?.title ?? "记言 · Minutes"}</strong><span>你的本地整理助手</span></div><span className="chat-local-label">● 本地优先</span></header>
@@ -175,18 +193,17 @@ export function ConversationWorkspace({ api }: { api: LocalApiClient }) {
         {loading && <p role="status">正在打开本地对话…</p>}
         {conversation?.sources.length ? <section className="chat-sources" aria-label="本会话资料"><span>本会话资料</span>{conversation.sources.map(source => <span className="chat-source-chip" key={`${source.kind}:${source.id}`}>{source.label}</span>)}</section> : null}
         {conversation?.messages.map(message => <article className={`chat-message chat-message-${message.role}`} key={message.message_id}><span className="chat-avatar">{message.role === "user" ? "你" : "记"}</span><div className="chat-message-content"><p className="chat-message-author">{message.role === "user" ? "你" : "记言"}</p>{message.text && <p className="chat-message-text">{message.text}</p>}{message.document_id && message.version_id && <ArtifactCard key={`${message.document_id}:${message.version_id}:${viewEpoch}`} api={api} message={message} />}</div></article>)}
-        {attachments.map(item => <AttachmentCard key={item.key} item={item} busy={busy || running} onRemove={() => setAttachments(items => items.filter(card => card.key !== item.key))} onCommit={(card, skipped) => void commitAttachment(card, skipped)} onNoteFallback={() => void prepareNote(item.noteFallback ?? "", item.key)} onRevise={edits => void reviseAttachment(item, edits)} />)}
+        {attachments.map(item => <AttachmentCard key={item.key} item={item} busy={busy || running} onRemove={() => setAttachments(items => items.filter(card => card.key !== item.key))} onCommit={(card, skipped) => void commitAttachment(card, skipped)} onNoteFallback={() => void prepareTextFallback(item.noteFallback ?? "", item.key)} onRevise={edits => void reviseAttachment(item, edits)} />)}
         {run && <div className="chat-run-status" role="status"><span className={run.state === "running" ? "chat-status-dot is-running" : "chat-status-dot"} />{runLabels[run.state]}</div>}
         {run?.state === "waiting_approval" && run.approval && <ApprovalCard key={run.approval.approval_id} approval={run.approval} busy={busy} onApprove={() => void mutate(value => api.approveAgentRun(value.conversation_id, run.run_id, run.approval!.approval_id, run.approval!.preview_fingerprint), "授权未被接受，请停止后重新发送要求。")} />}
         {error && <p role="alert">{error}</p>}<div ref={messagesEnd} />
       </div></main>
       <div className="chat-composer-area"><div className="chat-composer-wrap">
         {pending && <p className="chat-pending-note">请先确认或移除上方的待导入资料，再发送消息。</p>}
-        {noteOpen && <section className="chat-note-editor" aria-label="粘贴笔记"><label>笔记正文<textarea value={note} onChange={event => setNote(event.target.value)} disabled={disabled || running} /></label><div className="chat-inline-actions"><button type="button" disabled={disabled || running || !note.trim()} onClick={() => void prepareNote(note)}>预览笔记</button><button type="button" className="chat-text-button" onClick={() => { setNote(""); setNoteOpen(false); }}>取消</button></div></section>}
-        <div className="chat-composer"><textarea aria-label="发送消息" placeholder={conversation?.sources.length ? "告诉记言你想怎么整理，或接着提出修改…" : "添加资料，或先聊聊你想整理什么…"} rows={2} value={text} disabled={disabled} onChange={event => setText(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); send(); } }} />
-          <div className="chat-composer-toolbar"><div className="chat-attach-actions"><button type="button" className="chat-attach-button" aria-label="添加文件或图片" title="添加文件或图片" disabled={disabled || running} onClick={() => fileInput.current?.click()}>＋</button><input ref={fileInput} className="chat-file-input" type="file" multiple accept=".txt,.csv,.json,.jsonl,.xlsx,.zip,.png,.jpg,.jpeg" aria-label="添加资料" disabled={disabled || running} onChange={event => { const files = Array.from(event.target.files ?? []); event.target.value = ""; void prepareFiles(files); }} /><button type="button" className="chat-note-button" disabled={disabled || running} onClick={() => setNoteOpen(true)}>粘贴笔记</button></div>
-          {running ? <button type="button" className="chat-send" aria-label="停止" onClick={() => void stop()}>■ <span>停止</span></button> : <button type="button" className="chat-send" aria-label="发送" disabled={disabled || !text.trim() || pending || (noteOpen && !!note.trim())} onClick={send}>↑ <span>发送</span></button>}</div>
-        </div><p className="chat-composer-hint">仅在你逐次授权后向 AI 外发 · 脱敏不保证覆盖全部个人信息</p>
+        <div className="chat-composer"><textarea aria-label="发送消息" placeholder={conversation?.sources.length ? "告诉记言你想怎么整理，也可继续粘贴聊天记录…" : "直接粘贴聊天记录，或输入你想整理的要求…"} rows={2} value={text} disabled={disabled} onChange={event => setText(event.target.value)} onPaste={event => { if (disabled || running) return; const chat = composerChatText(event.clipboardData.getData("text/plain")); if (chat !== null) { event.preventDefault(); void preparePastedChat(chat); } }} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); send(); } }} />
+          <div className="chat-composer-toolbar"><div className="chat-attach-actions"><button type="button" className="chat-attach-button" aria-label="添加文件或图片" title="添加文件或图片" disabled={disabled || running} onClick={() => fileInput.current?.click()}>＋</button><input ref={fileInput} className="chat-file-input" type="file" multiple accept=".txt,.csv,.json,.jsonl,.xlsx,.zip,.png,.jpg,.jpeg" aria-label="添加资料" disabled={disabled || running} onChange={event => { const files = Array.from(event.target.files ?? []); event.target.value = ""; void prepareFiles(files); }} /></div>
+          {running ? <button type="button" className="chat-send" aria-label="停止" onClick={() => void stop()}>■ <span>停止</span></button> : <button type="button" className="chat-send" aria-label="发送" disabled={disabled || !text.trim() || pending} onClick={send}>↑ <span>发送</span></button>}</div>
+        </div><p className="chat-small">聊天记录会自动识别并在本机预览，确认后再整理。</p><p className="chat-composer-hint">仅在你逐次授权后向 AI 外发 · 脱敏不保证覆盖全部个人信息</p>
       </div></div>
     </div>
   </div>;

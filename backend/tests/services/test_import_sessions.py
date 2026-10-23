@@ -448,3 +448,30 @@ def test_skip_consent_cannot_commit_a_preview_without_valid_records(tmp_path):
         assert repository.message_count() == 0
     finally:
         service.close(); repository.close()
+
+def test_retained_same_owner_previews_commit_independently_and_default_still_replaces(tmp_path):
+    repository=ChatRepository(tmp_path/'retained.sqlite3')
+    service=ChatImportService(repository=repository,clock=Clock())
+    kwargs=dict(filename='chat.csv',payload=_payload(),origin='imported_file',platform_hint='qq',options=ImportOptions(timezone='Asia/Shanghai'),session_id='owner')
+    previews=[service.create_preview(**kwargs,retain_pending=True) for _ in range(2)]
+    for preview in previews:
+        assert service.commit_preview(preview.preview_id,preview_fingerprint=preview.preview_fingerprint,confirmed=True,session_id='owner').snapshot_id
+    old=service.create_preview(**kwargs,retain_pending=True)
+    service.create_preview(**kwargs)
+    with pytest.raises(ImportAuthorizationError):
+        service.commit_preview(old.preview_id,preview_fingerprint=old.preview_fingerprint,confirmed=True,session_id='owner')
+    service.close();repository.close()
+
+@pytest.mark.parametrize('limit_kind',['count','bytes'])
+def test_retained_same_owner_previews_count_toward_capacity(tmp_path,limit_kind):
+    repository=ChatRepository(tmp_path/'retained-capacity.sqlite3')
+    limits={'max_pending_previews':1} if limit_kind=='count' else {'max_pending_source_bytes':2*len(_payload())-1}
+    service=ChatImportService(repository=repository,clock=Clock(),**limits)
+    kwargs=dict(filename='chat.csv',payload=_payload(),origin='imported_file',platform_hint='qq',options=ImportOptions(timezone='Asia/Shanghai'),session_id='owner')
+    first=service.create_preview(**kwargs,retain_pending=True)
+    with pytest.raises(ImportNotReady,match='capacity'):
+        service.create_preview(**kwargs,retain_pending=True)
+    assert first.preview_id in service._pending
+    replacement=service.create_preview(**kwargs)
+    assert replacement.preview_id in service._pending and first.preview_id not in service._pending
+    service.close();repository.close()

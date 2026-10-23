@@ -88,3 +88,30 @@ test("对话等待授权时停止且新建会话不会带入旧资料", async ({
   await expect(page.getByText("创业讨论.txt", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "下载整理内容.txt", exact: true })).toHaveCount(0);
 });
+
+test("主输入框自动识别粘贴聊天，确认后发送要求，不打开旧页面", async ({ page }) => {
+  await page.goto("/");
+  const composer = page.getByRole("textbox", { name: "发送消息", exact: true });
+  await expect(composer).toBeEnabled();
+  await expect(page.getByRole("button", { name: "粘贴笔记", exact: true })).toHaveCount(0);
+  await composer.fill("整理创业的不同观点");
+  await composer.evaluate((element, text) => {
+    const data = new DataTransfer(); data.setData("text/plain", text);
+    element.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+  }, "合成甲：创业可以先验证用户需要，再尝试小规模的想法。\n合成乙：商业模式可以先研究收入来源，并记录不同观点。");
+  const card = page.getByRole("region", { name: "导入确认", exact: true });
+  await expect(card).toContainText("对话框聊天记录");
+  await expect(card).toContainText("可导入 2 条");
+  await expect(composer).toHaveValue("整理创业的不同观点");
+  await expect(page.getByRole("region", { name: "外发授权", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "高级资料与文档工具", exact: true })).toBeHidden();
+  await expect(page.getByRole("button", { name: "发送", exact: true })).toBeDisabled();
+  await card.getByRole("checkbox", { name: "我已核对预览并确认导入", exact: true }).check();
+  await card.getByRole("button", { name: "确认导入", exact: true }).click();
+  await expect(page.getByRole("region", { name: "已导入资料", exact: true })).toContainText("实际导入 2 条，跳过 0 条");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  const approval = page.getByRole("region", { name: "外发授权", exact: true });
+  await expect(approval).toContainText("整理创业的不同观点");
+  await expect(approval.getByRole("button", { name: "授权并继续", exact: true })).toBeDisabled();
+  await expect(page.getByRole("heading", { name: "高级资料与文档工具", exact: true })).toBeHidden();
+});
