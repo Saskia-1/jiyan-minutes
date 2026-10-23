@@ -356,7 +356,7 @@ class ConversationAgentService:
             if len(instruction) > 512:
                 self._message(state, '累计整理要求超过512字，请新建会话并简化完整要求。', run_id=run['run_id'])
             elif not state['sources']:
-                self._message(state, '请先添加并确认本会话的资料。', run_id=run['run_id'])
+                self._message(state, '请先添加本会话的资料。', run_id=run['run_id'])
             else:
                 self._sources(state, session_id)
                 state['runtime'] = dict(created_at=self._now().isoformat(), conversation_id=conversation_id, instruction=instruction,
